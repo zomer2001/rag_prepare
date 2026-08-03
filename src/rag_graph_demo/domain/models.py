@@ -42,6 +42,9 @@ class DocumentRecord(BaseModel):
     page_count: int | None = None
     status: DocumentStatus = DocumentStatus.UPLOADED
     lightrag_track_id: str | None = None
+    event_index_status: Literal["pending", "indexing", "ready", "failed"] = "pending"
+    event_count: int = 0
+    event_error: str | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -50,7 +53,7 @@ class DocumentRecord(BaseModel):
 class JobRecord(BaseModel):
     job_id: str
     document_id: str
-    operation: Literal["index", "delete", "reindex"]
+    operation: Literal["index", "delete", "reindex", "events"]
     status: JobStatus = JobStatus.PENDING
     message: str = ""
     created_at: datetime = Field(default_factory=utc_now)
@@ -78,6 +81,8 @@ class QueryRequest(BaseModel):
     enable_rerank: bool | None = None
     response_type: str = "Multiple Paragraphs"
     conversation_history: list[dict[str, str]] = Field(default_factory=list)
+    use_events: bool = True
+    event_limit: int = Field(default=12, ge=1, le=50)
 
 
 class CompareQueryRequest(BaseModel):
@@ -110,5 +115,8 @@ class QueryResponse(BaseModel):
     entities: list[dict[str, Any]] = Field(default_factory=list)
     relationships: list[dict[str, Any]] = Field(default_factory=list)
     chunks: list[dict[str, Any]] = Field(default_factory=list)
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    event_relations: list[dict[str, Any]] = Field(default_factory=list)
+    event_conflicts: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     elapsed_ms: int

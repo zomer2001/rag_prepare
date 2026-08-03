@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -231,7 +232,9 @@ class LightRAGEngine:
             return result.model_dump(mode="json")
         return dict(result)
 
-    async def query(self, request: QueryRequest) -> QueryResponse:
+    async def query(
+        self, request: QueryRequest, *, user_prompt: str | None = None
+    ) -> QueryResponse:
         rag = await self.initialize()
         started = perf_counter()
         enable_rerank = (
@@ -249,6 +252,7 @@ class LightRAGEngine:
                 max_total_tokens=request.max_total_tokens,
                 response_type=request.response_type,
                 conversation_history=request.conversation_history,
+                user_prompt=user_prompt,
                 enable_rerank=enable_rerank,
                 include_references=True,
             ),
@@ -272,6 +276,22 @@ class LightRAGEngine:
             metadata=dict(result.get("metadata") or {}),
             elapsed_ms=elapsed_ms,
         )
+
+    async def complete_extraction(self, prompt: str, system_prompt: str) -> str:
+        """Run a small structured extraction without initializing vector storage."""
+        if not self._settings.deepseek_api_key and self._llm_func_builder is None:
+            raise ConfigurationError("DEEPSEEK_API_KEY is required for event extraction")
+        build_llm = self._llm_func_builder or self._build_deepseek_func
+        result = await build_llm(self._settings.deepseek_extraction_model)(
+            prompt,
+            system_prompt=system_prompt,
+            response_format={"type": "json_object"},
+        )
+        if isinstance(result, str):
+            return result
+        if isinstance(result, (dict, list)):
+            return json.dumps(result, ensure_ascii=False)
+        return str(result)
 
     async def get_graph(
         self, label: str = "*", max_depth: int = 2, max_nodes: int = 100

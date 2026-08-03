@@ -67,6 +67,18 @@ def render_query_response(response: dict[str, Any]) -> None:
     col4.metric("关系", len(response.get("relationships") or []))
     st.subheader("引用")
     render_citations(response.get("citations") or [])
+    events = response.get("events") or []
+    if events:
+        st.subheader("事件通路")
+        for event in events:
+            st.markdown(
+                f"- `{event.get('start_time') or '时间未知'}` "
+                f"**{event.get('event_type')}** — {event.get('summary')} "
+                f"（{event.get('status')} / {event.get('confidence', 0):.2f}）"
+            )
+        conflicts = response.get("event_conflicts") or []
+        if conflicts:
+            st.warning("事件索引发现来源立场冲突，请结合原文引用核验。")
     with st.expander("检索上下文与调试数据"):
         st.json(
             {
@@ -102,8 +114,8 @@ st.set_page_config(page_title="RAG Graph Demo", page_icon="🔎", layout="wide")
 st.title("RAG Graph Demo")
 st.caption("LightRAG + Qdrant + Docling + DeepSeek")
 
-status_tab, documents_tab, query_tab, compare_tab, graph_tab = st.tabs(
-    ["系统状态", "文档管理", "知识库问答", "模式对比", "知识图谱"]
+status_tab, documents_tab, query_tab, events_tab, compare_tab, graph_tab = st.tabs(
+    ["系统状态", "文档管理", "知识库问答", "事件时间线", "模式对比", "知识图谱"]
 )
 
 with status_tab:
@@ -158,6 +170,8 @@ with documents_tab:
                 "标题": item.get("title"),
                 "文件": item.get("filename"),
                 "状态": item.get("status"),
+                "事件状态": item.get("event_index_status"),
+                "事件数": item.get("event_count", 0),
                 "页数": item.get("page_count"),
                 "错误": item.get("error"),
                 "ID": item.get("document_id"),
@@ -170,7 +184,7 @@ with documents_tab:
             options=documents,
             format_func=lambda item: f"{item.get('title')} · {item.get('status')}",
         )
-        col_preview, col_reindex, col_delete = st.columns(3)
+        col_preview, col_reindex, col_events, col_delete = st.columns(4)
         if col_preview.button("查看解析内容"):
             content = api_request(
                 "GET", f"/documents/{selected['document_id']}/content", timeout=10
@@ -183,6 +197,14 @@ with documents_tab:
             )
             if result:
                 st.success(f"重建任务已创建：{result.get('job_id')}")
+        if col_events.button("重建事件"):
+            result = api_request(
+                "POST",
+                f"/documents/{selected['document_id']}/events/rebuild",
+                timeout=10,
+            )
+            if result:
+                st.success(f"事件重建任务已创建：{result.get('job_id')}")
         confirm_delete = col_delete.checkbox("确认删除")
         if col_delete.button("删除", disabled=not confirm_delete) and api_request(
             "DELETE", f"/documents/{selected['document_id']}", timeout=120
@@ -204,6 +226,7 @@ with query_tab:
     top_k = col_top_k.slider("实体/关系召回", 1, 50, 20)
     chunk_top_k = col_chunk_k.slider("文本块召回", 1, 30, 10)
     enable_rerank = col_rerank.checkbox("启用 Reranker", value=False)
+    use_events = st.checkbox("启用事件通路（时间筛选、事件链与冲突提示）", value=True)
     if st.button("开始问答", disabled=not question.strip(), type="primary"):
         with st.spinner("正在检索和生成答案…"):
             response = api_request(
@@ -215,11 +238,61 @@ with query_tab:
                     "top_k": top_k,
                     "chunk_top_k": chunk_top_k,
                     "enable_rerank": enable_rerank,
+                    "use_events": use_events,
                 },
                 timeout=300,
             )
         if response:
             render_query_response(response)
+
+with events_tab:
+    st.subheader("事件时间线")
+    st.caption("事件是带时间、参与者、状态和原文证据的关系断言；并非绝对事实。")
+    col_entity, col_start, col_end = st.columns(3)
+    event_entity = col_entity.text_input("实体/产品", placeholder="Anduril 或 Lattice")
+    event_start = col_start.text_input("开始时间", placeholder="2023 或 2023-01")
+    event_end = col_end.text_input("结束时间", placeholder="2026-12-31")
+    event_question = st.text_input(
+        "事件问题（可选）", placeholder="近三年 Anduril 产品经历了哪些关键变化？"
+    )
+    if st.button("查询事件时间线", type="primary"):
+        timeline = api_request(
+            "POST",
+            "/events/query",
+            json={
+                "question": event_question,
+                "entity": event_entity or None,
+                "start_time": event_start or None,
+                "end_time": event_end or None,
+                "limit": 50,
+            },
+            timeout=30,
+        )
+        if timeline:
+            events = timeline.get("events") or []
+            if not events:
+                st.info("没有匹配事件。请先完成文档事件索引，或放宽筛选条件。")
+            for event in events:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{event.get('start_time') or '时间未知'} · "
+                        f"{event.get('event_type')}**"
+                    )
+                    st.write(event.get("summary"))
+                    st.caption(
+                        f"主体：{', '.join(event.get('actors') or []) or '-'} ｜ "
+                        f"对象：{', '.join(event.get('objects') or []) or '-'} ｜ "
+                        f"状态：{event.get('status')} ｜ "
+                        f"置信度：{event.get('confidence', 0):.2f}"
+                    )
+            with st.expander("事件关系、证据与冲突"):
+                st.json(
+                    {
+                        "relations": timeline.get("relations") or [],
+                        "mentions": timeline.get("mentions") or [],
+                        "conflicts": timeline.get("conflicts") or [],
+                    }
+                )
 
 with compare_tab:
     st.subheader("同一问题横向比较")

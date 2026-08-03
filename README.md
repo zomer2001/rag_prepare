@@ -10,6 +10,7 @@
 - [`TECHNICAL_REPORT.md`](TECHNICAL_REPORT.md)：当前实现、模块、提示词、数据融合、
   图谱机制与演进路线。
 - [`USER_GUIDE.md`](USER_GUIDE.md)：启动、导入、索引、查询、Prompt 定制和 Agent 接入。
+- [`EVENT_PATHWAY.md`](EVENT_PATHWAY.md)：事件通路的实现、数据模型、API、运行方式和边界。
 
 ## 已实现能力
 
@@ -22,6 +23,7 @@
 - 文档、页码、章节和原文片段引用映射。
 - 图谱可视化及同一问题的多模式横向比较。
 - FastAPI、Streamlit、批量导入、全量重建、诊断和 Smoke Test。
+- 事件抽取、跨文档合并、证据绑定、时间线、立场冲突检测和事件增强问答。
 
 LightRAG 本身负责“图谱 + 向量”。本项目没有再造第二套 RAG，只补充文档解析、来源
 映射、应用 API、UI 和运行管理。
@@ -174,6 +176,9 @@ docker-compose down
 | `POST` | `/api/v1/query/compare` | 多模式比较 |
 | `GET` | `/api/v1/graph` | 读取知识图谱 |
 | `GET` | `/api/v1/graph/labels` | 获取图谱实体标签 |
+| `GET` | `/api/v1/events` | 列出规范化事件 |
+| `POST` | `/api/v1/events/query` | 按问题、实体和时间查询事件链 |
+| `POST` | `/api/v1/documents/{id}/events/rebuild` | 单独重建文档事件 |
 
 ## 数据目录
 
@@ -182,6 +187,7 @@ data/
 ├── raw/        # 原始上传文件
 ├── parsed/     # 规范化 Markdown 和来源 Sidecar
 ├── registry/   # 文档与任务注册表
+├── events/     # 事件、提及、时间关系和冲突
 ├── lightrag/   # NetworkX、LightRAG KV 和状态
 ├── exports/
 └── logs/

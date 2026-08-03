@@ -58,12 +58,23 @@ class Settings(BaseSettings):
     lightrag_summary_language: str = "Chinese"
     entity_extraction_use_json: bool = True
     graph_index_concurrency: int = Field(default=1, ge=1, le=4)
+    event_extraction_enabled: bool = True
+    event_extraction_chunk_chars: int = Field(default=12_000, ge=2_000, le=50_000)
+    event_extraction_max_events: int = Field(default=40, ge=1, le=200)
 
     @property
     def required_data_dirs(self) -> tuple[Path, ...]:
         return tuple(
             self.data_dir / name
-            for name in ("raw", "parsed", "registry", "lightrag", "exports", "logs")
+            for name in (
+                "raw",
+                "parsed",
+                "registry",
+                "events",
+                "lightrag",
+                "exports",
+                "logs",
+            )
         )
 
     def ensure_data_dirs(self) -> None:

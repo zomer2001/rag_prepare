@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from rag_graph_demo import __version__
 from rag_graph_demo.api.routes.documents import router as documents_router
+from rag_graph_demo.api.routes.events import router as events_router
 from rag_graph_demo.api.routes.graph import router as graph_router
 from rag_graph_demo.api.routes.health import router as health_router
 from rag_graph_demo.api.routes.jobs import router as jobs_router
@@ -41,6 +42,7 @@ app = FastAPI(
 )
 app.include_router(health_router, prefix="/api/v1", tags=["system"])
 app.include_router(documents_router, prefix="/api/v1", tags=["documents"])
+app.include_router(events_router, prefix="/api/v1", tags=["events"])
 app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
 app.include_router(query_router, prefix="/api/v1", tags=["query"])
 app.include_router(graph_router, prefix="/api/v1", tags=["graph"])
