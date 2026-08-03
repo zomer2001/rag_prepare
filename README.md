@@ -141,6 +141,12 @@ uv run python scripts/import_directory.py /absolute/path/to/news --register-only
 uv run python scripts/reindex_all.py
 ```
 
+只为已有解析文档补建事件索引（可安全中断后重跑）：
+
+```bash
+uv run python scripts/rebuild_events.py --workers 2
+```
+
 清空本地文档、LightRAG 状态和当前 Embedding 对应的 Qdrant 集合：
 
 ```bash

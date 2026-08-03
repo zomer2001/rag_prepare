@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
+
 from rag_graph_demo.domain.events import (
     EventCandidate,
+    EventMention,
     EventQueryRequest,
     EventQueryResponse,
     EventRecord,
@@ -15,6 +19,26 @@ from rag_graph_demo.domain.events import (
 )
 from rag_graph_demo.lightrag_engine.engine import LightRAGEngine
 from rag_graph_demo.storage.event_registry import EventRegistry
+
+logger = logging.getLogger(__name__)
+
+
+def event_evidence_labels(
+    result: EventQueryResponse,
+) -> list[tuple[str, EventMention]]:
+    """Assign stable query-local citation labels in selected event order."""
+    mentions_by_event: dict[str, list[EventMention]] = {}
+    for mention in result.mentions:
+        mentions_by_event.setdefault(mention.event_id, []).append(mention)
+    labeled: list[tuple[str, EventMention]] = []
+    seen_documents: set[str] = set()
+    for event in result.events:
+        for mention in mentions_by_event.get(event.event_id, []):
+            if mention.document_id in seen_documents:
+                continue
+            seen_documents.add(mention.document_id)
+            labeled.append((f"E{len(labeled) + 1}", mention))
+    return labeled
 
 EVENT_SYSTEM_PROMPT = """你是情报资料的结构化事件抽取器。只抽取原文明确陈述的事件，
 不得把背景知识或推测写成事实。相同文段内的同一事件只输出一次。证据必须是原文中的
@@ -92,13 +116,51 @@ class LLMEventExtractor:
             event_values = payload.get("events") or []
             if not isinstance(event_values, list):
                 raise ValueError("Event extractor 'events' must be an array")
+            valid_before = len(candidates)
             for value in event_values:
                 if not isinstance(value, dict):
                     continue
-                candidates.append(EventCandidate.model_validate(value))
+                repaired = dict(value)
+                if not str(repaired.get("evidence") or "").strip():
+                    repaired["evidence"] = self._source_evidence(part, repaired)
+                try:
+                    candidates.append(EventCandidate.model_validate(repaired))
+                except ValidationError as exc:
+                    logger.warning("Skipping malformed event candidate: %s", exc)
+                    continue
                 if len(candidates) >= self._max_events:
                     return candidates
+            if event_values and len(candidates) == valid_before:
+                raise ValueError("All event candidates in a document part were malformed")
         return candidates
+
+    @staticmethod
+    def _source_evidence(part: str, value: dict[str, Any]) -> str:
+        """Select an exact source sentence when the model omits evidence."""
+        visible = re.sub(r"<!--.*?-->", "", part, flags=re.DOTALL).strip()
+        sentences = [
+            item.strip()
+            for item in re.split(r"(?<=[。！？.!?])\s+|\n+", visible)
+            if item.strip()
+        ]
+        if not sentences:
+            if not visible:
+                raise ValueError("Document part has no source text for event evidence")
+            return visible[:1_000]
+        raw_terms = [
+            value.get("trigger"),
+            value.get("action"),
+            *(value.get("actors") or []),
+            *(value.get("objects") or []),
+        ]
+        terms = [_normal(str(item)) for item in raw_terms if item]
+
+        def score(sentence: str) -> tuple[int, int]:
+            normalized = _normal(sentence)
+            return sum(term in normalized for term in terms if term), -len(sentence)
+
+        best = max(sentences, key=score)
+        return (best if score(best)[0] else sentences[0])[:1_000]
 
     def _split(self, text: str) -> list[str]:
         if len(text) <= self._chunk_chars:
@@ -164,6 +226,9 @@ class EventService:
         )
         query_terms = self._terms(" ".join((request.question, request.entity or "")))
         type_filters = {_normal(item) for item in request.event_types if item.strip()}
+        inferred_entity_events = self._events_matching_question_entities(
+            request.question, events
+        )
         scored: list[tuple[float, EventRecord]] = []
         for event in events:
             if event.confidence < request.min_confidence:
@@ -171,6 +236,8 @@ class EventService:
             if not request.include_disputed and event.status == EventStatus.DISPUTED:
                 continue
             if type_filters and _normal(event.event_type) not in type_filters:
+                continue
+            if inferred_entity_events and event.event_id not in inferred_entity_events:
                 continue
             event_time = event.start_time or event.end_time
             if (start_time or end_time) and not event_time:
@@ -244,21 +311,38 @@ class EventService:
         result = await self.search(EventQueryRequest(question=question, limit=limit))
         if not result.events:
             return "", result
+        evidence = event_evidence_labels(result)
+        labels_by_document = {
+            mention.document_id: label for label, mention in evidence
+        }
+        mentions_by_event: dict[str, list[EventMention]] = {}
+        for mention in result.mentions:
+            mentions_by_event.setdefault(mention.event_id, []).append(mention)
         lines = [
             "以下是事件索引按问题、时间和置信度筛出的结构化上下文。",
             "它们是带来源的断言，不是无条件真理；争议事件必须明确标注，不能编造因果关系。",
         ]
         for event in result.events:
             time_value = event.start_time or "时间未知"
+            event_mentions = mentions_by_event.get(event.event_id, [])
+            references = [
+                f"[{labels_by_document[item.document_id]}]"
+                for item in event_mentions
+                if item.document_id in labels_by_document
+            ]
+            excerpt = event_mentions[0].evidence[:300] if event_mentions else ""
             lines.append(
                 f"- [{event.event_id}] {time_value}｜{event.event_type}｜{event.summary}"
                 f"｜主体:{','.join(event.actors) or '-'}｜对象:{','.join(event.objects) or '-'}"
                 f"｜状态:{event.status.value}｜置信度:{event.confidence:.2f}"
-                f"｜来源文档:{','.join(event.source_document_ids)}"
+                f"｜证据:{','.join(references) or '-'} {excerpt}"
             )
         if result.conflicts:
             lines.append("冲突提示：" + "；".join(item.description for item in result.conflicts))
-        lines.append("回答时仍须以 LightRAG 返回的原文引用为证据，并说明时间与不确定性。")
+        lines.append(
+            "回答时仍须以原文为证据；引用上述事件时必须保留对应的 [E1]、[E2] 标签，"
+            "并说明时间与不确定性。"
+        )
         return "\n".join(lines), result
 
     @staticmethod
@@ -272,6 +356,29 @@ class EventService:
             else:
                 words.update(run[index : index + 2] for index in range(len(run) - 1))
         return words
+
+    @staticmethod
+    def _events_matching_question_entities(
+        question: str, events: list[EventRecord]
+    ) -> set[str]:
+        question_normal = _normal(question)
+        ascii_tokens = {
+            item
+            for item in re.findall(r"[a-z][a-z0-9_-]+", question.casefold())
+            if len(item) >= 4
+        }
+        matched: set[str] = set()
+        for event in events:
+            for entity in event.actors + event.objects:
+                normalized = _normal(entity)
+                if len(normalized) < 3:
+                    continue
+                if normalized in question_normal or any(
+                    token in normalized for token in ascii_tokens
+                ):
+                    matched.add(event.event_id)
+                    break
+        return matched
 
     @staticmethod
     def _infer_time_range(

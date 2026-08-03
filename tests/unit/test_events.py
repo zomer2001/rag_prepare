@@ -3,9 +3,10 @@ from __future__ import annotations
 import pytest
 
 from rag_graph_demo.domain.events import EventCandidate, EventQueryRequest, EventStatus
-from rag_graph_demo.domain.models import QueryRequest, QueryResponse
+from rag_graph_demo.domain.models import DocumentRecord, QueryRequest, QueryResponse
 from rag_graph_demo.services.event_service import EventService, LLMEventExtractor
 from rag_graph_demo.services.query_service import QueryService
+from rag_graph_demo.storage.document_registry import DocumentRegistry
 from rag_graph_demo.storage.event_registry import EventRegistry
 
 
@@ -97,6 +98,74 @@ async def test_event_query_filters_time_and_builds_timeline_relations(tmp_path) 
     assert result.relations[0].relation_type == "precedes"
 
 
+@pytest.mark.asyncio
+async def test_event_timeline_uses_adjacent_edges_not_complete_graph(tmp_path) -> None:
+    registry = EventRegistry(tmp_path / "events.json")
+    for index, year in enumerate(("2023", "2024", "2025"), start=1):
+        await registry.replace_document_events(
+            f"doc-{index}",
+            f"事件 {index}",
+            [candidate(summary=f"第 {index} 个事件。", start_time=year)],
+        )
+
+    _, _, relations, _ = await registry.snapshot()
+
+    assert len(relations) == 2
+
+
+@pytest.mark.asyncio
+async def test_question_entity_excludes_unrelated_events_in_same_year(tmp_path) -> None:
+    registry = EventRegistry(tmp_path / "events.json")
+    service = EventService(registry)
+    await registry.replace_document_events(
+        "doc-anduril",
+        "Anduril 合同",
+        [candidate(summary="Anduril 获得合同。", start_time="2025")],
+    )
+    await registry.replace_document_events(
+        "doc-paper",
+        "无关论文",
+        [
+            EventCandidate(
+                event_type="论文发表",
+                summary="OpenAlex 收录一篇论文。",
+                actors=["OpenAlex"],
+                objects=["机器学习论文"],
+                start_time="2025",
+                time_precision="year",
+                evidence="OpenAlex 收录一篇论文。",
+            )
+        ],
+    )
+
+    result = await service.search(
+        EventQueryRequest(question="2025 年 Anduril 有哪些关键合同？")
+    )
+
+    assert [item.summary for item in result.events] == ["Anduril 获得合同。"]
+
+
+@pytest.mark.asyncio
+async def test_derived_rebuild_merges_contained_object_names(tmp_path) -> None:
+    registry = EventRegistry(tmp_path / "events.json")
+    first = candidate(summary="联合开发集成 XR 产品。", start_time="2025-05-29")
+    first.objects = ["集成XR产品"]
+    first.actors = ["Anduril", "Meta"]
+    second = candidate(summary="联合开发 XR 产品。", start_time="2025-05-29")
+    second.objects = ["XR产品"]
+    second.actors = ["Anduril", "Meta"]
+    await registry.replace_document_events("doc-1", "英文", [first])
+    await registry.replace_document_events("doc-2", "中文", [second])
+
+    stats = await registry.rebuild_derived()
+    events, mentions, _, _ = await registry.snapshot()
+
+    assert stats["merged_events"] == 0  # online merge already caught the containment
+    assert len(events) == 1
+    assert len(mentions) == 2
+    assert events[0].status == EventStatus.MULTI_SOURCE
+
+
 class FakeExtractionEngine:
     async def complete_extraction(self, prompt: str, system_prompt: str) -> str:
         assert "文档标题：测试" in prompt
@@ -126,6 +195,27 @@ async def test_llm_event_extractor_accepts_fenced_json() -> None:
     assert events[0].objects == ["Anduril"]
 
 
+class MissingEvidenceEngine:
+    async def complete_extraction(self, prompt: str, system_prompt: str) -> str:
+        return """{"events": [{
+          "event_type": "合同授予",
+          "summary": "Anduril 获得合同",
+          "actors": ["Anduril"],
+          "objects": ["合同"],
+          "confidence": 0.8
+        }]}"""
+
+
+@pytest.mark.asyncio
+async def test_llm_event_extractor_repairs_missing_evidence_from_source() -> None:
+    extractor = LLMEventExtractor(MissingEvidenceEngine())
+    source = "背景说明。\n\n美国政府向 Anduril 授予合同。"
+
+    events = await extractor.extract("测试", source)
+
+    assert events[0].evidence == "美国政府向 Anduril 授予合同。"
+
+
 class FakeQueryEngine:
     def __init__(self) -> None:
         self.user_prompt = None
@@ -148,12 +238,27 @@ async def test_query_service_injects_event_context(tmp_path) -> None:
         "doc-1", "发布", [candidate(summary="发布 Lattice。", start_time="2025-03")]
     )
     engine = FakeQueryEngine()
-    service = QueryService(engine, EventService(registry))
+    documents = DocumentRegistry(tmp_path / "documents.json")
+    await documents.upsert(
+        DocumentRecord(
+            document_id="doc-1",
+            filename="release.md",
+            title="发布",
+            suffix=".md",
+            size_bytes=10,
+            checksum="checksum",
+            raw_path=str(tmp_path / "release.md"),
+        )
+    )
+    service = QueryService(engine, EventService(registry), documents)
 
     response = await service.query(QueryRequest(question="Lattice 何时发布？"))
 
     assert "事件索引" in engine.user_prompt
+    assert "[E1]" in engine.user_prompt
     assert len(response.events) == 1
+    assert response.citations[0].reference_id == "E1"
+    assert response.citations[0].excerpt == "发布 Lattice。"
     assert response.metadata["event_pathway"]["enabled"] is True
 
 

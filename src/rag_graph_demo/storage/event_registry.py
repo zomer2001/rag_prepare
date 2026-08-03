@@ -30,6 +30,15 @@ def _time_bucket(value: str | None) -> str:
     return (value or "unknown")[:10]
 
 
+def _sets_overlap(left: set[str], right: set[str]) -> bool:
+    return any(
+        first == second
+        or (min(len(first), len(second)) >= 3 and (first in second or second in first))
+        for first in left
+        for second in right
+    )
+
+
 def canonical_key(candidate: EventCandidate) -> str:
     actors = ",".join(sorted(_normal(item) for item in candidate.actors))
     objects = ",".join(sorted(_normal(item) for item in candidate.objects))
@@ -118,24 +127,43 @@ class EventRegistry:
         if not candidate_actors and not candidate_objects:
             return None
         for event in events.values():
-            if _normal(event.event_type) != _normal(candidate.event_type):
-                continue
-            event_actors = {_normal(item) for item in event.actors if _normal(item)}
-            event_objects = {_normal(item) for item in event.objects if _normal(item)}
-            if candidate_actors and event_actors and not candidate_actors & event_actors:
-                continue
-            if candidate_objects and event_objects and not candidate_objects & event_objects:
-                continue
-            if not (candidate_actors & event_actors or candidate_objects & event_objects):
-                continue
-            left_time = candidate.start_time
-            right_time = event.start_time
-            if left_time and right_time:
-                common_precision = min(len(left_time), len(right_time), 7)
-                if left_time[:common_precision] != right_time[:common_precision]:
-                    continue
-            return event.event_id
+            if self._equivalent(
+                event,
+                event_type=candidate.event_type,
+                actors=candidate_actors,
+                objects=candidate_objects,
+                start_time=candidate.start_time,
+            ):
+                return event.event_id
         return None
+
+    @staticmethod
+    def _equivalent(
+        event: EventRecord,
+        *,
+        event_type: str,
+        actors: set[str],
+        objects: set[str],
+        start_time: str | None,
+    ) -> bool:
+        if _normal(event.event_type) != _normal(event_type):
+            return False
+        event_actors = {_normal(item) for item in event.actors if _normal(item)}
+        event_objects = {_normal(item) for item in event.objects if _normal(item)}
+        if actors and event_actors and not _sets_overlap(actors, event_actors):
+            return False
+        if objects and event_objects and not _sets_overlap(objects, event_objects):
+            return False
+        if not (
+            _sets_overlap(actors, event_actors)
+            or _sets_overlap(objects, event_objects)
+        ):
+            return False
+        if start_time and event.start_time:
+            common_precision = min(len(start_time), len(event.start_time), 7)
+            if start_time[:common_precision] != event.start_time[:common_precision]:
+                return False
+        return True
 
     async def delete_document(self, document_id: str) -> None:
         await self.replace_document_events(document_id, "", [])
@@ -163,6 +191,61 @@ class EventRegistry:
             list(relations.values()),
             list(conflicts.values()),
         )
+
+    async def rebuild_derived(self) -> dict[str, int]:
+        """Recompute confidence, timeline edges, and conflicts without an LLM call."""
+        async with self._lock:
+            events, mentions, _, _ = self._read()
+            merged = self._merge_equivalent_events(events, mentions)
+            self._refresh_events(events, mentions)
+            relations = self._build_relations(events)
+            conflicts = self._build_conflicts(events, mentions)
+            self._write(events, mentions, relations, conflicts)
+        return {
+            "events": len(events),
+            "mentions": len(mentions),
+            "relations": len(relations),
+            "conflicts": len(conflicts),
+            "merged_events": merged,
+        }
+
+    def _merge_equivalent_events(
+        self,
+        events: dict[str, EventRecord],
+        mentions: dict[str, EventMention],
+    ) -> int:
+        merged = 0
+        survivors: dict[str, EventRecord] = {}
+        for event in sorted(events.values(), key=lambda item: (item.created_at, item.event_id)):
+            actors = {_normal(item) for item in event.actors if _normal(item)}
+            objects = {_normal(item) for item in event.objects if _normal(item)}
+            target = next(
+                (
+                    item
+                    for item in survivors.values()
+                    if self._equivalent(
+                        item,
+                        event_type=event.event_type,
+                        actors=actors,
+                        objects=objects,
+                        start_time=event.start_time,
+                    )
+                ),
+                None,
+            )
+            if target is None:
+                survivors[event.event_id] = event
+                continue
+            target.actors = list(dict.fromkeys(target.actors + event.actors))
+            target.objects = list(dict.fromkeys(target.objects + event.objects))
+            for mention in mentions.values():
+                if mention.event_id == event.event_id:
+                    mention.event_id = target.event_id
+            merged += 1
+        if merged:
+            events.clear()
+            events.update(survivors)
+        return merged
 
     def _refresh_events(
         self,
@@ -196,41 +279,53 @@ class EventRegistry:
     def _build_relations(
         self, events: dict[str, EventRecord]
     ) -> dict[str, EventRelation]:
+        entity_events: dict[str, list[tuple[EventRecord, str]]] = {}
+        for event in events.values():
+            for entity in dict.fromkeys(event.actors + event.objects):
+                normalized = _normal(entity)
+                if normalized:
+                    entity_events.setdefault(normalized, []).append((event, entity))
+
+        # A chain needs adjacent transitions, not a complete graph between every
+        # pair that mentions Anduril. Accumulate shared entities for each adjacent
+        # event pair, then emit one explainable edge per pair.
+        pair_entities: dict[tuple[str, str], list[str]] = {}
+        for linked in entity_events.values():
+            ordered = sorted(
+                linked,
+                key=lambda item: (item[0].start_time or "9999", item[0].event_id),
+            )
+            unique: list[tuple[EventRecord, str]] = []
+            seen: set[str] = set()
+            for item in ordered:
+                if item[0].event_id not in seen:
+                    unique.append(item)
+                    seen.add(item[0].event_id)
+            for (source, source_name), (target, _) in zip(unique, unique[1:], strict=False):
+                pair = (source.event_id, target.event_id)
+                pair_entities.setdefault(pair, []).append(source_name)
+
         relations: dict[str, EventRelation] = {}
-        ordered = sorted(events.values(), key=lambda item: item.start_time or "9999")
-        for index, source in enumerate(ordered):
-            source_entities = {_normal(item) for item in source.actors + source.objects}
-            if not source_entities:
-                continue
-            for target in ordered[index + 1 :]:
-                target_entities = {_normal(item) for item in target.actors + target.objects}
-                shared_normal = source_entities & target_entities
-                if not shared_normal:
-                    continue
-                shared = [
-                    item
-                    for item in source.actors + source.objects
-                    if _normal(item) in shared_normal
-                ]
-                if source.start_time and target.start_time:
-                    relation_type = (
-                        "same_time"
-                        if source.start_time == target.start_time
-                        else "precedes"
-                    )
-                else:
-                    relation_type = "related"
-                relation_id = _stable_id(
-                    "rel", f"{source.event_id}|{target.event_id}|{relation_type}"
+        for (source_id, target_id), shared in pair_entities.items():
+            source = events[source_id]
+            target = events[target_id]
+            if source.start_time and target.start_time:
+                relation_type = (
+                    "same_time" if source.start_time == target.start_time else "precedes"
                 )
-                relations[relation_id] = EventRelation(
-                    relation_id=relation_id,
-                    source_event_id=source.event_id,
-                    target_event_id=target.event_id,
-                    relation_type=relation_type,
-                    shared_entities=list(dict.fromkeys(shared)),
-                    confidence=0.8 if relation_type == "precedes" else 0.65,
-                )
+            else:
+                relation_type = "related"
+            relation_id = _stable_id(
+                "rel", f"{source_id}|{target_id}|{relation_type}"
+            )
+            relations[relation_id] = EventRelation(
+                relation_id=relation_id,
+                source_event_id=source_id,
+                target_event_id=target_id,
+                relation_type=relation_type,
+                shared_entities=list(dict.fromkeys(shared)),
+                confidence=0.8 if relation_type == "precedes" else 0.65,
+            )
         return relations
 
     def _build_conflicts(

@@ -1,24 +1,35 @@
 from __future__ import annotations
 
 import logging
+import re
 
+from rag_graph_demo.domain.events import EventQueryResponse
 from rag_graph_demo.domain.models import (
+    Citation,
     CompareQueryRequest,
     QueryRequest,
     QueryResponse,
 )
 from rag_graph_demo.lightrag_engine.engine import LightRAGEngine
-from rag_graph_demo.services.event_service import EventService
+from rag_graph_demo.services.event_service import EventService, event_evidence_labels
+from rag_graph_demo.storage.document_registry import DocumentRegistry
 
 logger = logging.getLogger(__name__)
+REFERENCE_SECTION_PATTERN = re.compile(
+    r"\n#{2,4}\s+References\s*\n.*$", re.IGNORECASE | re.DOTALL
+)
 
 
 class QueryService:
     def __init__(
-        self, engine: LightRAGEngine, event_service: EventService | None = None
+        self,
+        engine: LightRAGEngine,
+        event_service: EventService | None = None,
+        documents: DocumentRegistry | None = None,
     ) -> None:
         self._engine = engine
         self._event_service = event_service
+        self._documents = documents
 
     async def query(self, request: QueryRequest) -> QueryResponse:
         event_context = ""
@@ -36,6 +47,7 @@ class QueryService:
             request, user_prompt=event_context or None
         )
         if event_result is not None:
+            had_base_citations = bool(response.citations)
             response.events = [
                 item.model_dump(mode="json") for item in event_result.events
             ]
@@ -45,6 +57,10 @@ class QueryService:
             response.event_conflicts = [
                 item.model_dump(mode="json") for item in event_result.conflicts
             ]
+            event_citations = await self._event_citations(event_result)
+            response.citations.extend(event_citations)
+            if event_citations and not had_base_citations and response.answer:
+                response.answer = REFERENCE_SECTION_PATTERN.sub("", response.answer).rstrip()
             response.metadata["event_pathway"] = {
                 "enabled": True,
                 "event_count": len(event_result.events),
@@ -56,6 +72,29 @@ class QueryService:
         else:
             response.metadata["event_pathway"] = {"enabled": False}
         return response
+
+    async def _event_citations(
+        self, event_result: EventQueryResponse
+    ) -> list[Citation]:
+        if self._documents is None:
+            return []
+        citations: list[Citation] = []
+        for label, mention in event_evidence_labels(event_result):
+            document = await self._documents.get(mention.document_id)
+            if document is None:
+                continue
+            citations.append(
+                Citation(
+                    reference_id=label,
+                    document_id=document.document_id,
+                    title=document.title,
+                    filename=document.filename,
+                    file_path=document.raw_path,
+                    section="事件证据",
+                    excerpt=mention.evidence,
+                )
+            )
+        return citations
 
     async def compare(self, request: CompareQueryRequest) -> list[QueryResponse]:
         responses: list[QueryResponse] = []

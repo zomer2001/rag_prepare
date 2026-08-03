@@ -67,7 +67,8 @@
 3. 按词项相关度、置信度和时间完整度排序；
 4. 取事件链和冲突信息，作为 `user_prompt` 约束注入 LightRAG；
 5. LightRAG 仍从原文块生成答案和引用；事件只负责时间、状态和校验约束；
-6. API 同时返回 `events`、`event_relations`、`event_conflicts`，便于界面解释。
+6. 事件提及映射成 `[E1]` 形式的可追溯原文引用；
+7. API 同时返回 `events`、`event_relations`、`event_conflicts`，便于界面解释。
 
 这避免了“事件摘要自己证明自己”：最终答案仍必须引用原文，争议事件需要明确标注。
 
@@ -100,6 +101,12 @@ uv run streamlit run src/rag_graph_demo/ui/streamlit_app.py --server.port 8501
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/documents/文档ID/events/rebuild
+```
+
+为所有已有文档补建事件（默认跳过已经成功的文档，可中断后继续）：
+
+```bash
+uv run python scripts/rebuild_events.py --workers 2
 ```
 
 查询事件：

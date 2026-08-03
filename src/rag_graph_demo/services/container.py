@@ -45,7 +45,9 @@ class AppContainer:
             self.engine,
             self.event_service if settings.event_extraction_enabled else None,
         )
-        self.query_service = QueryService(self.engine, self.event_service)
+        self.query_service = QueryService(
+            self.engine, self.event_service, self.documents_registry
+        )
 
     async def shutdown(self) -> None:
         await self.engine.finalize()
