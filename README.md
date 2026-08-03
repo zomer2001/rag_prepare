@@ -1,14 +1,15 @@
 # RAG Graph Demo
 
-面向 Apple Silicon M4 16GB Mac 的本地多文档 RAG Demo。系统以 LightRAG
-作为唯一检索核心，同时建立向量索引和实体关系图谱；Qdrant 保存文本块、实体和关系
-向量，NetworkX 保存图结构，Docling 解析 DOCX/PDF，DeepSeek 完成抽取与回答。
+面向 Apple Silicon M4 16GB Mac 的 Anduril OSINT 多通路 RAG Demo。LightRAG 负责
+向量检索与实体关系图谱，事件断言层补充时间、状态、演化和原文证据；Collection 管线
+负责官网、合同、论文、专利、新闻和智库资料的采集与规范化。
 
 相关文档：
 
 - [`PROJECT_PLAN.md`](PROJECT_PLAN.md)：初始架构与选型论证。
-- [`TECHNICAL_REPORT.md`](TECHNICAL_REPORT.md)：当前实现、模块、提示词、数据融合、
-  图谱机制与演进路线。
+- [`TECHNICAL_REPORT.md`](TECHNICAL_REPORT.md)：当前架构、三通路索引、查询协同、
+  存储、验证和演进路线。
+- [`RUNBOOK.md`](RUNBOOK.md)：可逐行执行的采集、索引、事件补建、验收和恢复流程。
 - [`USER_GUIDE.md`](USER_GUIDE.md)：启动、导入、索引、查询、Prompt 定制和 Agent 接入。
 - [`EVENT_PATHWAY.md`](EVENT_PATHWAY.md)：事件通路的实现、数据模型、API、运行方式和边界。
 
@@ -25,8 +26,8 @@
 - FastAPI、Streamlit、批量导入、全量重建、诊断和 Smoke Test。
 - 事件抽取、跨文档合并、证据绑定、时间线、立场冲突检测和事件增强问答。
 
-LightRAG 本身负责“图谱 + 向量”。本项目没有再造第二套 RAG，只补充文档解析、来源
-映射、应用 API、UI 和运行管理。
+LightRAG 本身负责“语义图谱 + 向量”。事件层不是第二套 RAG，而是索引和查询两阶段
+的时间、状态与证据约束。
 
 ## 运行组件
 

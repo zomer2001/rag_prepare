@@ -1,9 +1,9 @@
-# 多文档 LightRAG 图谱问答系统技术报告
+# Anduril OSINT 多通路 RAG 系统技术报告
 
 > 文档类型：As-built 技术报告  
 > 项目名称：`rag-graph-demo`  
-> 报告版本：v1.0  
-> 编写日期：2026-07-31  
+> 报告版本：v2.0
+> 更新日期：2026-08-03
 > 目标环境：Apple Silicon M4、16GB 内存、macOS  
 > 当前核心版本：LightRAG 1.5.3、Qdrant 1.18.2、Docling 2.117.0
 
@@ -15,13 +15,13 @@
 
 1. 系统总体架构和模块边界。
 2. Markdown、DOCX、PDF 的摄取、解析、索引和引用链路。
-3. LightRAG 的向量检索、图谱构建和五种检索模式。
-4. Qdrant、NetworkX、本地 JSON 与文件系统各自承担的存储职责。
-5. 本地 Embedding、可选 Reranker 与 DeepSeek LLM 的职责划分。
-6. 实体抽取、关键词抽取、回答生成等提示词的结构和调用方式。
-7. 图谱数据、文本块和引用在查询阶段的融合方式。
-8. 当前限制、安全边界、验证结果和未来扩展路线。
-9. 在现有系统上增加 Agent、评估、时序图谱和生产化能力的方法。
+3. Collection 采集、规范化、版本化和知识库导入边界。
+4. LightRAG 的向量检索、语义图谱和五种检索模式。
+5. 事件抽取、归一合并、证据绑定、时间链和冲突表达。
+6. 向量、语义和事件三条通路在索引与查询阶段的协同。
+7. Qdrant、NetworkX、事件库、本地 JSON 与文件系统的存储职责。
+8. 本地 Embedding、可选 Reranker 与 DeepSeek LLM 的职责划分。
+9. 诊断、运行恢复、安全边界、验证结果和生产化路线。
 
 本报告不把 LightRAG 内部已经提供的能力包装成项目自研算法。项目的核心价值是将
 LightRAG、Qdrant、Docling、DeepSeek 和本地模型组织成一个可运行、可引用、可展示的
@@ -33,11 +33,16 @@ LightRAG、Qdrant、Docling、DeepSeek 和本地模型组织成一个可运行�
 
 ### 2.1 核心架构
 
-系统采用“LightRAG 单检索核心 + 多种存储后端”的设计：
+系统采用“采集层 + LightRAG 语义核心 + 事件断言层”的设计：
 
+- Collection 管线从官网、合同、论文、专利、新闻和智库来源采集并规范化资料。
 - LightRAG 统一完成文本切块、向量索引、实体关系抽取、图谱索引和查询编排。
 - Qdrant 保存文本块、实体和关系三类向量。
 - NetworkX 保存实体关系图的拓扑结构和属性。
+- EventService 把静态描述转换为带时间、主体、动作、对象、结果和证据的事件。
+- EventRegistry 保存规范化事件、来源提及、相邻时间关系和冲突记录。
+- QueryService 解析问题中的时间与实体约束，将事件上下文作为 `user_prompt` 注入
+  LightRAG，同时保留 `[E#]` 原文事件引用。
 - LightRAG JSON KV 保存原文、Chunk、实体、关系、文档状态和 LLM 缓存。
 - 项目自己的 JSON Registry 保存用户可见的文档状态与后台任务状态。
 - Docling 将 PDF、DOCX 规范化为 Markdown。
@@ -47,22 +52,23 @@ LightRAG、Qdrant、Docling、DeepSeek 和本地模型组织成一个可运行�
 
 ### 2.2 当前真实数据状态
 
-截至本报告编写时，本地 Demo 已完成：
+以下是 2026-08-03 在当前分支完成真实 DeepSeek 抽取后的本地验证快照。运行数据被
+`.gitignore` 排除，不是仓库内置固定数据：
 
 | 指标 | 当前值 |
 |---|---:|
-| 已导入文档 | 9 |
-| `ready` 文档 | 9 |
-| 成功索引任务 | 9 |
-| Qdrant Chunk 向量 | 9 |
-| Qdrant 实体向量 | 72 |
-| Qdrant关系向量 | 79 |
-| NetworkX 图节点 | 72 |
-| NetworkX 图关系 | 79 |
+| Collection Clean Markdown | 246 |
+| 已注册且 LightRAG `ready` 文档 | 234 / 234 |
+| 事件索引 `ready` 文档 | 234 / 234 |
+| 规范化事件 | 307 |
+| 事件来源提及 | 335 |
+| 相邻事件关系 | 316 |
+| 单源 / 多源事件 | 288 / 19 |
+| 冲突记录 | 0 |
+| 包含至少一个事件的文档 | 198 |
 
-当前语料是 9 篇围绕 Anduril 的中英混合新闻摘要。由于每篇材料较短，默认
-`700 token` 切块后每篇基本形成一个 Chunk，因此 Chunk 向量数也是 9。更长文档会
-自然产生更多 Chunk。
+36 篇文档没有抽出事件，主要是产品导航、简介或缺少明确动作和时间的短页面。这种
+`event_count=0` 仍是成功结果，不应被误判为索引失败。
 
 ### 2.3 当前部署边界
 
@@ -72,8 +78,9 @@ LightRAG、Qdrant、Docling、DeepSeek 和本地模型组织成一个可运行�
 2. FastAPI 进程：`127.0.0.1:8000`。
 3. Streamlit 进程：`127.0.0.1:8501`。
 
-Embedding、Reranker、Docling 和 LightRAG 均在 FastAPI 或批处理脚本进程内运行，
-没有单独部署模型服务。DeepSeek 是唯一外部网络模型服务。
+Embedding、Reranker、Docling、LightRAG 和事件规则均在 FastAPI 或批处理脚本进程内
+运行。DeepSeek 是唯一外部模型服务。Collection 与知识索引故意分成两个阶段：采集
+阶段绝不写 Qdrant；只有 `import_directory.py` 才把 Clean 数据导入知识库。
 
 ---
 
@@ -81,12 +88,16 @@ Embedding、Reranker、Docling 和 LightRAG 均在 FastAPI 或批处理脚本进
 
 ```mermaid
 flowchart LR
+    SRC["官网 / 合同 / 论文 / 专利 / 新闻 / 智库"]
+    COL["Collection Pipeline<br/>发现 / 策略 / 抓取 / 清洗 / 版本化"]
+    CLEAN[("data/collection/clean")]
     USER["用户 / Agent"]
     UI["Streamlit UI"]
     API["FastAPI API"]
     DOC["DocumentService"]
     PARSER["Markdown Parser / Docling"]
     QUERY["QueryService"]
+    EVENT["EventService<br/>抽取 / 归并 / 时间过滤 / 证据"]
     ENGINE["LightRAGEngine"]
     EMBED["Qwen3 Embedding 0.6B<br/>本地 MPS"]
     RERANK["BGE Reranker v2 M3<br/>可选、本地"]
@@ -95,18 +106,25 @@ flowchart LR
     GRAPH[("NetworkX GraphML")]
     LKV[("LightRAG JSON KV")]
     REG[("Document / Job Registry")]
+    EREG[("Event Store<br/>Events / Mentions / Relations / Conflicts")]
     FILES[("Raw / Parsed Files")]
 
+    SRC --> COL
+    COL --> CLEAN
+    CLEAN --> DOC
     USER --> UI
     USER --> API
     UI --> API
     API --> DOC
     API --> QUERY
+    QUERY --> EVENT
     DOC --> PARSER
     DOC --> ENGINE
+    DOC --> EVENT
     QUERY --> ENGINE
     PARSER --> FILES
     DOC --> REG
+    EVENT --> EREG
     ENGINE --> EMBED
     ENGINE --> RERANK
     ENGINE --> LLM
@@ -128,6 +146,8 @@ sequenceDiagram
     participant M as DeepSeek
     participant Q as Qdrant
     participant G as NetworkX
+    participant V as EventService
+    participant R as EventRegistry
 
     U->>A: 上传文件或批量导入
     A->>D: create_upload()
@@ -141,6 +161,11 @@ sequenceDiagram
     L->>Q: 写入三类向量集合
     L->>G: 写入图节点和边
     L-->>D: track_id + processed 状态
+    D->>V: extract(title, parsed_text)
+    V->>M: 严格 JSON 事件抽取
+    V->>R: 归一、跨文档合并、绑定证据
+    R->>R: 单源/多源/争议状态 + 相邻时间关系
+    R-->>D: event_count / event_index_status
     D->>D: 文档状态更新为 ready
 ```
 
@@ -150,14 +175,20 @@ sequenceDiagram
 sequenceDiagram
     participant U as 用户
     participant A as API
+    participant SVC as QueryService
+    participant V as EventService
     participant L as LightRAGEngine
     participant M as DeepSeek
     participant Q as Qdrant
     participant G as NetworkX
     participant S as SourceMapper
 
-    U->>A: question + mode + top_k
-    A->>L: QueryRequest
+    U->>A: question + mode + top_k + use_events
+    A->>SVC: QueryRequest
+    SVC->>V: 解析年份、实体和事件意图
+    V->>V: 时间过滤、相关度排序、事件链和冲突筛选
+    V-->>SVC: 事件上下文 + [E#] 证据映射
+    SVC->>L: QueryRequest + event user_prompt
     L->>M: 高层/低层关键词抽取
     L->>Q: 检索 Chunk/实体/关系向量
     L->>G: 扩展实体邻域和关系上下文
@@ -166,7 +197,9 @@ sequenceDiagram
     L->>S: reference_id 映射原文件、页码、章节
     S-->>L: Citation[]
     L->>L: 过滤未使用引用并改写可读标题
-    L-->>A: answer + citations + entities + relationships + chunks
+    L-->>SVC: answer + citations + entities + relationships + chunks
+    SVC->>SVC: 合并 LightRAG 引用与 [E#] 事件引用
+    SVC-->>A: answer + 三通路上下文 + 可追溯证据
     A-->>U: 结构化结果
 ```
 
@@ -197,6 +230,9 @@ sequenceDiagram
 | Parser | `PARSER_OCR_ENABLED` | 是否启用 PDF OCR |
 | LightRAG | `LIGHTRAG_QUERY_MODE` | 默认查询模式 |
 | 并发 | `LLM_MAX_CONCURRENCY` | DeepSeek 最大并发 |
+| 事件 | `EVENT_EXTRACTION_ENABLED` | 是否在文档索引后抽取事件 |
+| 事件 | `EVENT_EXTRACTION_CHUNK_CHARS` | 单次事件抽取字符数 |
+| 事件 | `EVENT_EXTRACTION_MAX_EVENTS` | 单文档最多事件数 |
 
 `EMBEDDING_MODEL` 与 `EMBEDDING_MODEL_ID` 被有意拆分：
 
@@ -214,8 +250,18 @@ sequenceDiagram
 - `JobRecord`：索引、重建任务的执行状态。
 - `ParsedDocument`：规范化文本、页数和来源片段。
 - `QueryRequest`：问题、模式、召回参数、上下文预算和对话历史。
-- `QueryResponse`：答案、引用、实体、关系、Chunk 和耗时。
+- `QueryRequest.use_events`：是否启用事件约束，默认开启。
+- `QueryResponse`：答案、引用、实体、关系、Chunk、事件、事件关系、冲突和耗时。
 - `Citation`：引用编号、文档 ID、标题、页码、章节和原文摘录。
+
+文件 `src/rag_graph_demo/domain/events.py` 定义：
+
+- `EventCandidate`：LLM 单文档抽取结果。
+- `EventRecord`：跨文档规范化后的事件主记录。
+- `EventMention`：某份文档对事件的提及、立场、置信度和原文证据。
+- `EventRelation`：`precedes`、`same_time`、`related` 相邻事件边。
+- `EventConflict`：当前实现的肯定/否定立场冲突。
+- `EventQueryRequest/Response`：结构化事件查询协议。
 
 文档状态机：
 
@@ -229,6 +275,16 @@ uploaded
 任意阶段异常 -> failed
 删除时       -> deleting
 ```
+
+事件索引拥有独立子状态：
+
+```text
+pending -> indexing -> ready
+                    -> failed
+```
+
+LightRAG 已成功而事件抽取失败时，文档仍保持 `ready`，基础 RAG 可继续查询；事件错误
+记录在 `event_error`，可单独重试，不需要重做向量和实体图谱。
 
 任务状态机：
 
@@ -264,6 +320,7 @@ pending -> running -> succeeded
 - `src/rag_graph_demo/storage/atomic_json.py`
 - `src/rag_graph_demo/storage/document_registry.py`
 - `src/rag_graph_demo/storage/job_registry.py`
+- `src/rag_graph_demo/storage/event_registry.py`
 
 实现特点：
 
@@ -271,6 +328,7 @@ pending -> running -> succeeded
 - 写入临时文件后执行 `flush`、`fsync`，最后使用 `os.replace` 原子替换。
 - 避免进程意外退出留下半截 JSON。
 - 文档支持按 ID、SHA-256 和文件路径查找。
+- 事件库支持文档级替换、来源提及保留、派生关系重算和无来源事件清理。
 
 适用范围是本地单用户 Demo。它不是支持多实例并发写入的数据库；如果未来运行多个
 FastAPI Worker，应迁移到 SQLite 或 PostgreSQL。
@@ -288,6 +346,8 @@ FastAPI Worker，应迁移到 SQLite 或 PostgreSQL。
 - SourceMapper
 - DocumentParser
 - LightRAGEngine
+- EventRegistry
+- LLMEventExtractor / EventService
 - DocumentService
 - QueryService
 
@@ -319,7 +379,9 @@ FastAPI 停止时调用 `engine.finalize()`，关闭 LightRAG 存储。这个轻
 6. 文档更新为 `indexing`。
 7. 调用 `LightRAGEngine.index_document()`。
 8. 验证 LightRAG 最终状态确实为 `PROCESSED`。
-9. 文档更新为 `ready`，任务更新为 `succeeded`。
+9. 调用 EventService 抽取并规范化事件。
+10. 保存事件提及、证据、置信度、状态和相邻时间关系。
+11. 文档更新为 `ready`，任务更新为 `succeeded`。
 
 项目没有仅凭 LightRAG 返回 Track ID 就认为索引成功，而是再次读取 Track ID 下的
 文档状态。这可以捕捉“任务已创建但内部写入失败”的情况。
@@ -333,14 +395,23 @@ FastAPI 停止时调用 `engine.finalize()`，关闭 LightRAG 存储。这个轻
 
 实际引用展示时，`SourceMapper` 会重新映射回本地 raw 文件路径和用户可读标题。
 
+事件阶段单独捕获异常。事件失败只设置 `event_index_status=failed`；已经成功的
+LightRAG 数据不会回滚。`rebuild_events.py` 默认跳过事件状态为 `ready` 的文档，支持
+安全中断和续跑。
+
 ### 4.7 查询服务
 
 文件：`src/rag_graph_demo/services/query_service.py`
 
-职责很薄：
+职责包括：
 
-- 单模式调用直接委托给 LightRAGEngine。
-- 模式比较按选择顺序逐个运行，避免 M4 16GB 上多个大查询并发竞争内存和 API 配额。
+- 根据问题年份、年份范围或“近 N 年”建立时间约束。
+- 从问题中识别已知事件实体，例如 `Anduril`，排除同时段无关论文。
+- 召回并排序事件，构造包含状态、置信度和原文证据的 `user_prompt`。
+- 调用 LightRAG 完成向量与语义图谱检索和答案生成。
+- 将事件提及映射为 `[E1]`、`[E2]` 引用，并绑定原文件路径和摘录。
+- 事件层异常时降级到基础 LightRAG，不让事件库故障拖垮问答。
+- 模式比较按顺序执行，避免本地模型和 API 配额竞争。
 
 未来如需提升模式比较速度，可以设置最大并发为 2，但需要同时控制 DeepSeek 和
 Embedding 的并发上限。
@@ -369,6 +440,10 @@ Embedding 的并发上限。
 | `POST` | `/api/v1/query/compare` | 多模式比较 |
 | `GET` | `/api/v1/graph` | 获取子图或全图 |
 | `GET` | `/api/v1/graph/labels` | 获取实体标签 |
+| `GET` | `/api/v1/events` | 列出规范化事件 |
+| `GET` | `/api/v1/events/{id}` | 获取单个事件 |
+| `POST` | `/api/v1/events/query` | 按问题、实体、类型和时间查询事件 |
+| `POST` | `/api/v1/documents/{id}/events/rebuild` | 单独重建文档事件 |
 
 业务异常映射：
 
@@ -385,13 +460,14 @@ Embedding 的并发上限。
 
 文件：`src/rag_graph_demo/ui/streamlit_app.py`
 
-UI 包含五个页签：
+UI 包含六个页签：
 
 1. 系统状态：显示诊断和模型配置。
 2. 文档管理：上传、预览、重建、删除、查看任务。
 3. 知识库问答：选择模式、召回量和 Reranker。
-4. 模式对比：同一问题顺序运行多个模式。
-5. 知识图谱：按实体、深度、节点数加载 Graphviz 图。
+4. 事件时间线：按实体、时间和问题查询事件、证据、关系及冲突。
+5. 模式对比：同一问题顺序运行多个模式。
+6. 知识图谱：按实体、深度、节点数加载 Graphviz 图。
 
 UI 不直接访问 Qdrant 或 LightRAG，全部通过 FastAPI。这样未来替换前端时无需改变核心
 业务层。
@@ -593,6 +669,56 @@ LightRAG 对每个 Chunk 调用 `extract` 角色 LLM，要求返回严格 JSON�
 
 这对 M4 16GB 很重要。串行索引避免 Docling、Embedding 和多个 LLM 抽取同时争抢内存。
 
+### 6.6 事件索引机制
+
+事件索引不是把“事件”当成一个普通实体类型，而是独立的关系断言层。每个解析文档在
+LightRAG 成功后，由 `LLMEventExtractor` 按最多 12,000 字符的片段调用 DeepSeek，要求
+返回严格 JSON：
+
+```json
+{
+  "events": [
+    {
+      "event_type": "合同授予",
+      "summary": "美国陆军向 Anduril 授予合同",
+      "action": "授予",
+      "actors": ["美国陆军", "Anduril Industries"],
+      "objects": ["NGC2 原型合同"],
+      "start_time": "2025-07-18",
+      "time_precision": "day",
+      "evidence": "原文中的直接证据句",
+      "stance": "affirmed",
+      "confidence": 0.95
+    }
+  ]
+}
+```
+
+写入前执行：
+
+1. 清洗主体和对象名称，规范化事件类型及部分日期。
+2. 按事件类型、相容时间、主体和对象包含关系寻找等价事件。
+3. 合并中英文或不同来源的同一事件，但保留每份文档的独立 `EventMention`。
+4. 根据来源文档数计算 `single_source` 或 `multi_source`。
+5. 同一事件同时存在 `affirmed` 与 `denied` 时标记 `disputed` 并生成冲突记录。
+6. 对每个实体只连接时间排序后的相邻事件，避免公共实体形成完全图。
+
+如果模型遗漏 `evidence`，系统不会生成伪证据，而是从当前原文片段中确定性选择最匹配
+句子。其他不合法候选按条跳过；当一个片段所有候选都不合法时，文档事件状态失败并可
+重试。
+
+### 6.7 三通路索引协同
+
+```text
+解析后文档
+  ├─ Chunk Embedding → Qdrant：保存“原文说了什么”
+  ├─ 实体/关系抽取 → NetworkX + Qdrant：保存“对象之间有什么关系”
+  └─ 事件抽取/归并 → Event Store：保存“关系何时、以何状态和何证据成立”
+```
+
+三条索引共享同一个稳定 `document_id`。因此查询阶段可从事件回到文档证据，也可从
+LightRAG Chunk 映射回原始文件，而不需要复制第三份不可追溯文本。
+
 ---
 
 ## 7. 向量模型和 Reranker
@@ -688,6 +814,7 @@ RAG 系统包含不同形态的数据：
 | Chunk/实体/关系向量 | Qdrant |
 | 图节点和边 | NetworkX GraphML |
 | LightRAG KV、缓存和状态 | JSON KV |
+| 事件、提及、时间边和冲突 | Event Registry JSON |
 
 Qdrant 是向量数据库，不是原始文档仓库，也不是当前的图数据库。NetworkX 是进程内图
 算法库和本地图文件存储，不是支持复杂事务和分布式查询的图数据库。
@@ -768,7 +895,29 @@ data/lightrag/demo_v1/graph_chunk_entity_relation.graphml
 LLM 缓存可降低重复查询和重复索引成本，但也意味着模型输入或结果可能被写入本地磁盘。
 处理敏感文档时必须将 `data/lightrag` 纳入数据安全和清理策略。
 
-### 8.5 持久化和备份
+### 8.5 Event Registry 的职责
+
+文件：
+
+```text
+data/events/event_store.json
+```
+
+包含四组数据：
+
+| 集合 | 含义 |
+|---|---|
+| `events` | 规范化事件、时间、参与者、状态和综合置信度 |
+| `mentions` | 每份来源文档的原文证据、立场和抽取置信度 |
+| `relations` | 共享实体上的相邻事件时间链 |
+| `conflicts` | 当前为肯定/否定立场冲突 |
+
+事件库使用原子 JSON 写入和进程内锁，适合本地单进程 Demo。事件没有另建向量集合：
+LightRAG 继续负责语义发现，事件库负责结构化时间过滤、演化顺序和证据断言。数据达到
+数千至数万事件、需要多 Worker 或复杂 SQL 时，应迁移到 PostgreSQL；只有复杂图路径
+成为主要负载时才需要独立图数据库。
+
+### 8.6 持久化和备份
 
 需要一起备份：
 
@@ -776,6 +925,7 @@ LLM 缓存可降低重复查询和重复索引成本，但也意味着模型输�
 data/raw/
 data/parsed/
 data/registry/
+data/events/
 data/lightrag/
 qdrant_storage/
 .env（应使用安全方式单独保管）
@@ -794,6 +944,7 @@ LightRAG 1.5.3 支持角色级 LLM 配置。当前项目配置三个角色：
 | 角色 | 当前模型 | 功能 |
 |---|---|---|
 | `extract` | `DEEPSEEK_EXTRACTION_MODEL` | 索引时抽取实体和关系 |
+| 事件抽取 | `DEEPSEEK_EXTRACTION_MODEL` | 文档级结构化事件、证据和立场 |
 | `keyword` | `DEEPSEEK_EXTRACTION_MODEL` | 查询时抽取高层/低层关键词 |
 | `query` | `DEEPSEEK_CHAT_MODEL` | 最终答案生成 |
 
@@ -845,12 +996,12 @@ LLM_MAX_CONCURRENCY=2
 
 当前 LightRAG 角色的最大异步并发是 2，索引并发是 1。
 
-这满足小规模 Demo，但应注意：
+项目的 DeepSeek 适配器已对连接错误、请求超时、服务端错误和限流执行可配置重试，
+退避时间按 1、2、4 秒增长并限制最大等待。认证错误和格式错误不会盲目重试。
 
-- `LLM_MAX_RETRIES` 已在 Settings 中保留，目前没有显式传给 OpenAI 适配器。
-- API SDK 和 LightRAG 自身可能有缓存或错误处理，但生产版应明确实现指数退避。
-- 应区分 429、网络超时、模型格式错误和内容策略错误。
-- 重试实体抽取时必须保证幂等，防止重复写图。
+事件批处理默认 2 个 Worker；每篇文档使用“先删除该文档旧提及，再写入新结果”的替换
+语义，因此中断后重跑不会累积重复事件。`scripts/rebuild_events.py` 只处理未就绪文档，
+也可用 `--force` 显式重建。
 
 ### 9.4 成本构成
 
@@ -859,8 +1010,9 @@ DeepSeek 消耗发生在：
 1. 每个 Chunk 的实体关系抽取。
 2. 抽取补漏或格式修复。
 3. 同名实体和关系描述合并。
-4. 每次图谱查询的关键词抽取。
-5. 每次最终回答生成。
+4. 每个事件抽取片段的结构化事件抽取。
+5. 每次图谱查询的关键词抽取。
+6. 每次最终回答生成。
 
 本地 Embedding 不消耗 DeepSeek Token。索引完成后，重复问题可能命中 LightRAG LLM
 缓存，从而降低费用。
@@ -871,13 +1023,16 @@ DeepSeek 消耗发生在：
 
 ### 10.1 当前提示词来源
 
-当前项目没有复制或修改 LightRAG 的整套 Prompt，而是使用安装包
+LightRAG 实体、关系、关键词和回答继续使用安装包
 `lightrag/prompt.py` 中的内置 Prompt。项目通过以下配置影响 Prompt：
 
 - `addon_params={"language": "Chinese"}`。
 - `entity_extraction_use_json=True`。
 - QueryParam 的 `response_type`。
 - QueryParam 的 `conversation_history`。
+
+事件抽取 Prompt 则由项目在 `services/event_service.py` 中版本化维护，明确要求只抽取
+原文事件、ISO 部分日期、原文证据、立场和置信度，并使用 JSON Object 响应格式。
 
 优点是保持与 LightRAG 1.5.3 的流程兼容；缺点是领域本体和回答风格尚未项目级版本化。
 
@@ -947,6 +1102,13 @@ low_level_keywords:
 4. Reference Document List。
 5. 对话历史。
 
+启用事件通路时，QueryService 还会通过 `QueryParam.user_prompt` 加入：
+
+- 时间范围内的候选事件；
+- 主体、对象、状态和置信度；
+- `[E#]` 事件证据编号和原文摘录；
+- 冲突提示和“时间先后不等于因果”的约束。
+
 `naive` 模式只包含 Document Chunks 和引用列表。
 
 回答约束：
@@ -991,22 +1153,17 @@ LightRAG 的 `QueryParam` 支持 `user_prompt`，适合：
 - 是否必须输出对比表。
 - 是否逐条标注证据。
 
-当前项目尚未把 `user_prompt` 暴露到 `QueryRequest`。建议增加：
-
-```python
-class QueryRequest(BaseModel):
-    ...
-    user_prompt: str | None = None
-```
-
-并在 `LightRAGEngine.query()` 中传入：
+当前项目已使用 `user_prompt` 传递系统生成的事件约束：
 
 ```python
 QueryParam(
     ...
-    user_prompt=request.user_prompt,
+    user_prompt=event_context,
 )
 ```
+
+它没有直接暴露成任意用户指令字段，避免绕过事件证据约束。未来若允许用户附加格式
+指令，应与系统事件上下文分栏并设置长度及内容限制。
 
 第二层：实体类型和 Few-shot 示例。
 
@@ -1049,7 +1206,7 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 
 ---
 
-## 11. 五种检索模式和数据融合
+## 11. 五种检索模式与向量、语义、事件协同
 
 ### 11.1 `naive`
 
@@ -1104,16 +1261,38 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 
 这是当前默认模式，也是最适合演示“图谱 + 向量”的模式。
 
-### 11.6 融合发生在哪里
+### 11.6 三条通路如何协同
 
-当前项目没有实现自定义加权公式。融合由 LightRAG 1.5.3 完成：
+系统不把事件设计成与 LightRAG 并列的第三套 RAG。职责是：
 
-1. LLM 抽取高层和低层关键词。
-2. 分别在实体、关系、Chunk 三类向量中检索。
-3. 从 NetworkX 扩展图邻域与证据来源。
-4. 去重、排序并按实体、关系、总上下文 Token 预算裁剪。
-5. 组织统一 Context。
-6. 调用 Query LLM 生成答案。
+| 通路 | 查询职责 | 主要存储 |
+|---|---|---|
+| 向量 | 发现语义相似原文，回答“哪些材料可能相关” | Qdrant Chunk |
+| 语义 | 限定实体和关系，回答“涉及谁、是什么关系” | Qdrant Entity/Relation + NetworkX |
+| 事件 | 约束时间、状态、演化和证据，回答“何时、以何状态成立” | Event Registry |
+
+实际查询顺序：
+
+1. QueryService 从问题解析显式年份、年份范围或“近 N 年”。
+2. 若问题中的英文或完整中文名称命中事件参与实体，将其变成硬过滤条件。
+3. EventService 按实体、时间、类型、置信度和词项相关度筛选事件。
+4. 只保留所选事件之间的相邻时间边和冲突，形成事件上下文。
+5. LightRAG 抽取高层和低层关键词。
+6. 在实体、关系、Chunk 三类向量中检索并从 NetworkX 扩展图邻域。
+7. LightRAG 去重、排序、预算裁剪并生成答案。
+8. QueryService 合并 LightRAG 文档引用与 `[E#]` 事件证据引用。
+
+事件存储不可用时，第 1～4 步自动降级，系统仍执行基础 LightRAG 查询。
+
+LightRAG 内部没有被项目替换为自定义加权公式。其向量与语义融合仍由 1.5.3 完成：
+
+```text
+事件约束上下文
+       ↓ user_prompt
+向量 Chunk + 语义实体/关系/子图
+       ↓ Context packing
+DeepSeek 回答 + LightRAG 引用 + [E#] 事件引用
+```
 
 项目控制的主要融合参数：
 
@@ -1125,14 +1304,16 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 | `cosine_threshold` | 0.2 | 向量最低相似度 |
 | `enable_rerank` | false | 是否重排文本候选 |
 
-### 11.7 当前融合不足
+### 11.7 当前融合边界
 
 - 没有 BM25 或稀疏向量，专有名词拼写和精确字符串可能只靠 Dense Embedding。
-- 没有时间、来源、文档类型过滤。
-- 没有按来源可信度加权。
+- 事件已有时间和实体过滤，但 LightRAG Chunk 召回尚未使用统一元数据过滤。
+- 多源状态目前按不同文档近似，尚未按出版机构独立性和来源等级加权。
 - 没有显式的多样性优化或 MMR。
 - 没有 Query Router 自动选择模式。
 - 没有基于问题类型动态分配实体、关系和 Chunk Token 预算。
+- 事件召回是结构化过滤加轻量词项相关度，没有独立事件向量。
+- 事件时间边表示相邻顺序或相关性，绝不自动解释为因果。
 
 这些是下一阶段最有价值的检索创新点。
 
@@ -1168,7 +1349,7 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 
 ### 12.3 单元测试
 
-当前测试覆盖：
+当前全量测试为 114 个，覆盖：
 
 - 配置默认值。
 - API 业务异常状态码。
@@ -1179,6 +1360,11 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 - LightRAG 最终索引状态检查。
 - 引用映射、页码、标题和回退逻辑。
 - 答案引用过滤和可读标题改写。
+- Collection 策略、SSRF、条件请求、解析、去重、版本化和离线端到端运行。
+- 事件跨来源归并、时间链、冲突状态和文档替换语义。
+- 模型漏掉事件证据时，从原文恢复证据的行为。
+- 隐含实体过滤，防止 Anduril 时间查询混入同年无关论文。
+- `[E#]` 事件引用映射和事件层故障降级。
 
 ### 12.4 当前缺失的评估
 
@@ -1190,6 +1376,7 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 - 引用正确率。
 - 实体去重准确率。
 - 图关系抽取 Precision/Recall。
+- 事件抽取和事件归并 Precision/Recall。
 - Prompt、模型和参数实验追踪。
 - Token、费用和调用延迟统计。
 
@@ -1229,7 +1416,8 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 4. 可选 Reranker。
 5. DeepSeek 最终回答。
 
-当前 9 篇短新闻实测单次查询大约为数秒到十余秒，具体取决于模式、API 延迟和缓存。
+2026-08-03 的真实验证中，234 篇已索引文档上的一次 `mix + events` 查询约 15.9 秒，
+返回 12 个直接相关事件和 13 条事件证据引用。该数字是单机单次快照，不是 SLA。
 
 ### 13.3 扩容拐点
 
@@ -1278,8 +1466,9 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 
 ### 14.4 删除语义
 
-删除文档会调用 LightRAG 按 `document_id` 删除图和向量关联，再删除本地 raw/parsed
-文件及 Registry。大量删除前应备份，并在删除后检查 Qdrant Point 数和图谱来源。
+删除文档会调用 LightRAG 按 `document_id` 删除图和向量关联，同时删除该文档的事件
+提及；失去所有来源的事件会被清理。随后删除本地 raw/parsed 文件及 Registry。大量
+删除前应备份，并检查 Qdrant Point、图谱来源和事件数量。
 
 ---
 
@@ -1293,12 +1482,15 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 6. 默认实体类型是通用本体，不是国防新闻领域本体。
 7. 实体别名、缩写和中英文同义名可能形成重复节点。
 8. 关系默认大多按无向关系处理，不适合严格的因果/所有权语义。
-9. 没有时间属性和事件演化建模。
-10. 没有稀疏检索、BM25 和元数据过滤。
-11. Reranker 尚未在本机真实语料上做收益评估。
-12. 回答引用是列表级，而非逐句可验证引用。
-13. 没有 Agent 工具执行层。
-14. 没有用户、权限、审计和 Prompt 版本管理。
+9. 事件已有时间属性和相邻演化链，但没有可靠的自动因果识别。
+10. 事件类型和中英文实体归并仍以规则为主，可能欠合并或误合并。
+11. 多源状态按文档数计算，尚未判断同一媒体转载或来源引用关系。
+12. 事件没有独立向量索引，适合当前 Demo 规模。
+13. 没有稀疏检索、BM25 和统一元数据过滤。
+14. Reranker 尚未在本机真实语料上做收益评估。
+15. LightRAG 引用与事件引用已可追溯，但尚未对最终答案执行逐 Claim 二次校验。
+16. 没有 Agent 工具执行层。
+17. 没有用户、权限、审计和 Prompt 版本管理。
 
 ---
 
@@ -1365,23 +1557,27 @@ entity_canonical_id = org.us.army
 - LLM 二次判定。
 - 人工合并界面。
 
-### 16.3 P1：时间感知图谱
+### 16.3 P1：事件层生产化
 
-新闻关系天然具有时间：
+当前已经保存事件时间、记录时间、来源提及、状态和证据。下一步不是重新设计一套事件
+标签，而是提高现有事件断言层的精度：
 
 ```text
-Anduril --[获得合同]--> NATO
-valid_from: 2026-07-28
-reported_at: 2026-07-28
-source_id: ...
-confidence: ...
+Event --participant--> Anduril
+Event --object--> Contract
+Event.start_time: 2026-07-28
+Mention.recorded_at: 2026-08-03
+Mention.source_id: ...
+Event.confidence: ...
 ```
 
-创新点：
+重点包括：
 
-- 区分事实发生时间和报道时间。
+- 增加独立出版机构识别、来源等级和转载链。
+- 增加参数冲突、版本冲突和状态机缺口检测。
 - 查询“截至某日”的知识快照。
-- 检测同一关系的更新、终止和冲突。
+- 增加 `event_version`，保留合并和人工修订历史。
+- 为大规模事件增加独立向量候选召回。
 - 自动生成公司战略变化时间线。
 
 ### 16.4 P1：Dense + Sparse + Graph 三路融合
@@ -1555,8 +1751,8 @@ Agent 的关键不是让 LLM 直接访问 Qdrant，而是让它调用稳定、�
 
 1. 领域本体 Prompt。
 2. 中英文实体别名归一化。
-3. 时间属性和来源置信度。
-4. 图谱人工审核和合并界面。
+3. 事件来源等级、转载识别和版本记录。
+4. 事件参数冲突、状态演化和人工审核界面。
 
 ### 阶段 D：Agent 和自动报告
 
@@ -1578,7 +1774,7 @@ Agent 的关键不是让 LLM 直接访问 Qdrant，而是让它调用稳定、�
 
 ## 18. 关键设计判断
 
-1. **LightRAG 本身已经完成图谱 + 向量。** 项目不应另造一套图谱 RAG。
+1. **LightRAG 本身已经完成语义图谱 + 向量。** 项目不另造第二套图谱 RAG。
 2. **Qdrant 只负责向量。** 图结构目前由 NetworkX 保存。
 3. **16GB Mac 不应同时常驻多个大模型。** 生成式 LLM 使用 DeepSeek API是合理选择。
 4. **当前瓶颈不是数据库容量。** 数据质量、实体消歧、评估和引用精度更重要。
@@ -1586,6 +1782,10 @@ Agent 的关键不是让 LLM 直接访问 Qdrant，而是让它调用稳定、�
 6. **Agent 应通过业务 API 使用 RAG。** 不要让 Agent 直接修改 Qdrant 或 GraphML。
 7. **推断关系不能伪装成事实。** 图算法预测、LLM 推理和文档明确陈述必须分层。
 8. **更换 Embedding 必须重建索引。** 模型 ID、维度、归一化和指令前缀都是索引契约。
+9. **事件不是第三套独立 RAG。** 它是索引和查询两阶段的时间、状态与证据断言层。
+10. **时间先后不等于因果。** 当前事件关系只连接共享实体上的相邻事件。
+11. **事件失败不应拖垮基础检索。** 文档状态与事件子状态分离，查询支持自动降级。
+12. **采集和索引必须分层。** Collection 只生成可审计 Clean 数据，导入脚本才写知识库。
 
 ---
 
@@ -1608,6 +1808,9 @@ Agent 的关键不是让 LLM 直接访问 Qdrant，而是让它调用稳定、�
 | `README.md` | 项目概览 |
 | `PROJECT_PLAN.md` | 初始项目计划和选型 |
 | `USER_GUIDE.md` | 启动、导入、索引、查询和维护手册 |
+| `EVENT_PATHWAY.md` | 事件层设计、API、边界和生产化方向 |
+| `RUNBOOK.md` | 可逐行执行的采集、索引、事件补建和故障恢复手册 |
+| `ANDURIL_DATA_PIPELINE_AGENT_BRIEF.md` | 供其他智能体执行 Collection 数据管线的任务说明 |
 | `src/rag_graph_demo/config.py` | 配置 |
 | `src/rag_graph_demo/ingestion/parser.py` | 文档解析 |
 | `src/rag_graph_demo/lightrag_engine/engine.py` | LightRAG 和 DeepSeek 核心适配 |
@@ -1616,4 +1819,5 @@ Agent 的关键不是让 LLM 直接访问 Qdrant，而是让它调用稳定、�
 | `src/rag_graph_demo/services/document_service.py` | 文档索引编排 |
 | `src/rag_graph_demo/api/app.py` | FastAPI 入口 |
 | `src/rag_graph_demo/ui/streamlit_app.py` | Streamlit 入口 |
-
+    SRC --> COL --> CLEAN
+    CLEAN --> DOC

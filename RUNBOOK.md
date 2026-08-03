@@ -1,8 +1,9 @@
-# `rag_prepare` 启动、抓取、导入与界面运行手册
+# `rag_prepare` 采集、三通路索引、查询与恢复 Runbook
 
 > 项目路径：`/Users/zomeryang/Documents/Codex/2026-07-31/rag_prepare`  
 > 使用方式：按照对应章节逐行复制命令。  
-> 数据流程：自动抓取 → `data/collection/clean` → 解析 → LightRAG/Qdrant 索引 → Web 界面查询。
+> 数据流程：自动抓取 → Clean 数据 → 解析 → 向量/语义/事件索引 → 带证据查询。
+> 当前分支：`feature/event-pipeline`。
 
 ---
 
@@ -45,6 +46,10 @@ LLM_REQUEST_TIMEOUT_SECONDS=600
 LLM_MAX_RETRIES=3
 LLM_MAX_CONCURRENCY=1
 GRAPH_INDEX_CONCURRENCY=1
+
+EVENT_EXTRACTION_ENABLED=true
+EVENT_EXTRACTION_CHUNK_CHARS=12000
+EVENT_EXTRACTION_MAX_EVENTS=40
 ```
 
 如果需要抓取 PatentsView 专利，再添加：
@@ -255,7 +260,7 @@ find data/collection/dead_letter -type f 2>/dev/null | wc -l
 
 ---
 
-## 4. 将 Collection 数据解析并建立索引
+## 4. 将 Collection 数据建立三通路索引
 
 确认基础诊断通过：
 
@@ -275,9 +280,11 @@ uv run python scripts/import_directory.py /Users/zomeryang/Documents/Codex/2026-
 2. 将原件复制到 `data/raw/<document_id>/`；
 3. 将解析结果写入 `data/parsed/<document_id>/`；
 4. 将文档登记到 `data/registry/documents.json`；
-5. 使用 DeepSeek 抽取实体和关系；
-6. 将图谱写入 LightRAG；
-7. 将文本块、实体和关系向量写入 Qdrant。
+5. 生成文本 Chunk Embedding 并写入 Qdrant；
+6. 使用 DeepSeek 抽取实体和关系，写入 LightRAG/NetworkX；
+7. 使用 DeepSeek 抽取时间、主体、动作、对象、结果和原文证据；
+8. 归并跨文档事件，计算单源/多源/争议状态；
+9. 写入 `data/events/event_store.json` 并生成相邻事件链。
 
 查看知识库文档状态：
 
@@ -285,17 +292,53 @@ uv run python scripts/import_directory.py /Users/zomeryang/Documents/Codex/2026-
 uv run python -c 'import json; from collections import Counter; d=json.load(open("data/registry/documents.json")); print("文档总数:",len(d)); print(Counter(v["status"] for v in d.values()))'
 ```
 
-理想结果类似：
+同时检查文档主状态与事件子状态：
 
-```text
-文档总数: 11
-Counter({'ready': 11})
+```bash
+uv run python -c 'import json; from collections import Counter; d=json.load(open("data/registry/documents.json")); print("文档:",Counter(v["status"] for v in d.values())); print("事件:",Counter(v.get("event_index_status","legacy_missing") for v in d.values()))'
 ```
+
+理想结果是两组状态均全部为 `ready`。`event_count=0` 可以是成功结果，表示该文档没有
+明确事件，不代表失败。
 
 列出没有成功的文档：
 
 ```bash
 uv run python -c 'import json; d=json.load(open("data/registry/documents.json")); [print(k,v["status"],v["filename"],v.get("error")) for k,v in d.items() if v["status"]!="ready"]'
+```
+
+列出事件抽取失败的文档：
+
+```bash
+uv run python -c 'import json; d=json.load(open("data/registry/documents.json")); [print(k,v.get("event_index_status"),v["filename"],v.get("event_error")) for k,v in d.items() if v.get("event_index_status")!="ready"]'
+```
+
+### 4.1 只给已有文档补建事件
+
+升级事件分支后，旧文档通常已经有 LightRAG 索引，不应重复生成向量和实体图谱。运行：
+
+```bash
+uv run python scripts/rebuild_events.py --workers 2
+```
+
+脚本特点：
+
+- 默认跳过 `event_index_status=ready` 的文档；
+- 中断后可直接重跑；
+- 每篇文档以替换方式写入，不累积重复提及；
+- 结束时重算事件状态、冲突和相邻时间关系；
+- 任意文档失败时返回非零退出码。
+
+小批量验证：
+
+```bash
+uv run python scripts/rebuild_events.py --workers 1 --limit 10
+```
+
+强制重建指定文档：
+
+```bash
+uv run python scripts/rebuild_events.py --workers 1 --force --document-id <DOCUMENT_ID>
 ```
 
 ---
@@ -321,6 +364,7 @@ API 地址：
 - API 文档：<http://127.0.0.1:8000/docs>
 - 健康检查：<http://127.0.0.1:8000/api/v1/health>
 - 完整诊断：<http://127.0.0.1:8000/api/v1/diagnostics>
+- 事件列表：<http://127.0.0.1:8000/api/v1/events>
 
 命令行检查 API：
 
@@ -361,7 +405,10 @@ uv run streamlit run src/rag_graph_demo/ui/streamlit_app.py --server.address 127
 - 手动上传 Markdown、PDF、DOCX；
 - 查看解析结果；
 - 重新索引失败文档；
+- 单独重建事件索引；
 - 使用 `naive`、`local`、`global`、`hybrid`、`mix` 模式查询；
+- 开关事件通路并查看 `[E#]` 原文证据；
+- 按实体和时间查看事件时间线；
 - 查看知识图谱；
 - 对比不同检索模式。
 
@@ -397,6 +444,12 @@ uv run python -m rag_graph_demo.collection.cli --live --limit 100 run --group p1
 
 ```bash
 uv run python scripts/import_directory.py /Users/zomeryang/Documents/Codex/2026-07-31/rag_prepare/data/collection/clean
+```
+
+如果文档是从旧分支导入、事件状态尚未就绪，再运行：
+
+```bash
+uv run python scripts/rebuild_events.py --workers 2
 ```
 
 ### 终端二：API
@@ -448,7 +501,9 @@ uv run python scripts/import_directory.py /Users/zomeryang/Documents/anduril_dat
 
 ---
 
-## 9. 失败文档恢复
+## 9. 失败恢复
+
+### 9.1 LightRAG 文档失败
 
 先运行诊断：
 
@@ -478,6 +533,43 @@ curl http://127.0.0.1:8000/api/v1/jobs
 
 项目现在会在 reindex 时自动清理失败插入和 duplicate 残留状态，并对 DeepSeek 瞬时连接错误进行自动重试。
 
+### 9.2 仅事件索引失败
+
+如果文档主状态已经是 `ready`，但 `event_index_status=failed`，不要重建 LightRAG。直接：
+
+```bash
+uv run python scripts/rebuild_events.py --workers 2
+```
+
+也可以通过 API 单独重建：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/documents/<DOCUMENT_ID>/events/rebuild
+```
+
+事件失败不会破坏已经成功的向量和语义图谱索引；查询会自动降级到基础 LightRAG。
+
+### 9.3 DeepSeek 返回格式不完整
+
+事件抽取器会逐条校验 JSON。模型漏掉 `evidence` 时，系统从当前原文片段中选择真实句子
+补齐，不生成伪证据；其他坏候选会被跳过。当整个片段都不合法时文档标为事件失败，
+修正代码或模型配置后重新运行批处理即可。
+
+### 9.4 验证事件库派生数据
+
+当所有文档均为事件 `ready` 时再次运行批处理，不会调用 DeepSeek，只会重算派生数据：
+
+```bash
+uv run python scripts/rebuild_events.py --workers 2
+```
+
+输出应类似：
+
+```text
+No documents need event rebuilding.
+Refreshed derived event data: {'events': ..., 'mentions': ..., 'relations': ..., 'conflicts': ...}
+```
+
 ---
 
 ## 10. 常见问题检查
@@ -503,6 +595,14 @@ curl -v --connect-timeout 15 https://api.deepseek.com
 ```
 
 未携带 API Key 时返回 `401` 说明 DNS、TCP 和 TLS 基本正常。
+
+更可靠的项目级检查是：
+
+```bash
+uv run python scripts/doctor.py
+```
+
+它会携带本机密钥查询模型列表，但不会打印密钥。
 
 ### 检查代理变量
 
@@ -541,6 +641,30 @@ lsof -nP -iTCP:8501 -sTCP:LISTEN
 ```bash
 lsof -nP -iTCP:6333 -sTCP:LISTEN
 ```
+
+### Docker 指向不存在的 Colima Socket
+
+如果看到 `~/.colima/default/docker.sock: no such file or directory`：
+
+```bash
+colima start
+```
+
+```bash
+docker context use colima
+```
+
+```bash
+docker info
+```
+
+本机安装的是独立 `docker-compose` 命令时使用：
+
+```bash
+docker-compose up -d qdrant
+```
+
+不要改成不可用的 `docker compose` 子命令。
 
 ---
 
@@ -588,8 +712,93 @@ data/collection/review_queue/ 待人工复核数据
 data/raw/                  已导入知识库的原件
 data/parsed/               已解析的 Markdown 和元数据
 data/registry/             文档与任务注册表
+data/events/               事件、来源提及、相邻关系和冲突
 data/lightrag/             LightRAG 文本块、实体、关系与图谱状态
 qdrant_storage/            Qdrant 向量数据
 ```
 
-不要手动编辑或删除 `data/lightrag`、`qdrant_storage` 和 `data/registry` 中的内容。
+不要手动编辑或删除 `data/lightrag`、`data/events`、`qdrant_storage` 和 `data/registry`
+中的内容。
+
+---
+
+## 13. 查询与证据验收
+
+### 13.1 结构化事件查询
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/events/query \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"2024到2026年 Anduril 有哪些关键合同？","limit":20}'
+```
+
+检查：
+
+- `inferred_start_time` 和 `inferred_end_time` 是否正确；
+- `events` 是否只包含与 Anduril 直接相关的事件；
+- `status` 是否区分 `single_source`、`multi_source`、`disputed`；
+- `mentions.evidence` 是否为原文；
+- 时间关系是否为相邻事件链，而不是所有 Anduril 事件两两相连。
+
+### 13.2 完整三通路问答
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question":"按时间线梳理2024到2026年 Anduril 的关键合同和合作",
+    "mode":"mix",
+    "use_events":true,
+    "event_limit":12,
+    "enable_rerank":false
+  }'
+```
+
+合格结果应同时具备：
+
+1. `metadata.event_pathway.enabled=true`；
+2. `events` 不为空且没有明显无关实体；
+3. `citations` 包含 `[E1]` 等事件引用；
+4. 每个 `[E#]` 都能回到文档标题、路径和 `excerpt`；
+5. 回答不把 `precedes` 自动解释为因果。
+
+如需做 A/B 对比，把 `use_events` 改为 `false`，其余参数保持不变。
+
+---
+
+## 14. 测试、备份与版本提交
+
+运行代码和文档检查：
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run ruff check .
+```
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run pytest
+```
+
+需要一起备份：
+
+```text
+data/raw/
+data/parsed/
+data/registry/
+data/events/
+data/lightrag/
+qdrant_storage/
+```
+
+`.env` 必须单独安全保管，不能提交 Git。`data/events/` 已被 `.gitignore` 排除。
+
+查看当前分支和未提交修改：
+
+```bash
+git status --short --branch
+```
+
+本项目的事件功能分支：
+
+```bash
+git switch feature/event-pipeline
+```
