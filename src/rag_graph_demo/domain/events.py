@@ -122,4 +122,3 @@ class EventQueryResponse(BaseModel):
     conflicts: list[EventConflict] = Field(default_factory=list)
     inferred_start_time: str | None = None
     inferred_end_time: str | None = None
-
