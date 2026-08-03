@@ -1,0 +1,5 @@
+{
+  "POST https://api.usaspending.gov/api/v2/search/spending_by_award/": "search_page1.json",
+  "GET https://api.usaspending.gov/api/v2/awards/359204966/": "detail_359204966.json",
+  "GET https://api.usaspending.gov/api/v2/awards/349450950/": "detail_349450950.json"
+}

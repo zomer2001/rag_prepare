@@ -1,0 +1,16 @@
+{
+  "generated_unique_award_id": "CONT_AWD_W911W625F0020_9700_W911W624D0008_9700",
+  "piid": "W911W625F0020",
+  "type_description": "DELIVERY ORDER",
+  "description": "SMALL FIXTURE TASK ORDER",
+  "total_obligation": 957500.0,
+  "potential_award_amount": 957500.0,
+  "total_outlay": 0.0,
+  "period_of_performance_start_date": "2025-05-16",
+  "period_of_performance_current_end_date": "2025-12-31",
+  "awarding_agency": {
+    "toptier_agency": {"name": "Department of Defense"},
+    "office_agency_name": "AMCOM FIXTURE"
+  },
+  "recipient": {"recipient_name": "ANDURIL INDUSTRIES, INC.", "uei": "FIXTUREUEI123"}
+}

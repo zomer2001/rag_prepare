@@ -1,0 +1,4 @@
+{
+  "GET https://search.patentsview.org/api/v1/patent/": "patents_page1.json",
+  "GET https://patents.google.com/patent/US12345678": "patent_US12345678.json"
+}

@@ -1,0 +1,5 @@
+{
+  "GET https://api.openalex.org/works": "works_page1.json",
+  "GET https://api.openalex.org/works/W999000111": "work_W999000111.json",
+  "GET https://api.openalex.org/works/W999000222": "work_W999000222.json"
+}

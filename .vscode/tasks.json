@@ -1,0 +1,49 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Qdrant: Start",
+      "type": "shell",
+      "command": "docker-compose up -d qdrant",
+      "problemMatcher": []
+    },
+    {
+      "label": "API: Run",
+      "type": "shell",
+      "command": ".venv/bin/uvicorn rag_graph_demo.api.app:app --reload --host 127.0.0.1 --port 8000",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "UI: Run",
+      "type": "shell",
+      "command": ".venv/bin/streamlit run src/rag_graph_demo/ui/streamlit_app.py --server.address 127.0.0.1 --server.port 8501",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Tests: Run",
+      "type": "shell",
+      "command": "UV_CACHE_DIR=.uv-cache uv run pytest",
+      "problemMatcher": []
+    },
+    {
+      "label": "Doctor: Run",
+      "type": "shell",
+      "command": ".venv/bin/python scripts/doctor.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "LightRAG: Smoke Test",
+      "type": "shell",
+      "command": ".venv/bin/python scripts/smoke_lightrag.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "Index: Rebuild All",
+      "type": "shell",
+      "command": ".venv/bin/python scripts/reindex_all.py",
+      "problemMatcher": []
+    }
+  ]
+}

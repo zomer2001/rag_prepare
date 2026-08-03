@@ -1,0 +1,22 @@
+{
+  "patents": [
+    {
+      "patent_id": "12345678",
+      "patent_title": "Modular autonomous aerial vehicle interception system (fixture)",
+      "patent_abstract": "A fixture abstract describing an interception system for hostile unmanned aircraft.",
+      "patent_date": "2025-09-30",
+      "application": {"filing_date": "2023-11-02"},
+      "assignees": [{"assignee_organization": "Anduril Industries, Inc."}],
+      "inventors": [
+        {"inventor_name_first": "Alex", "inventor_name_last": "Fixture"},
+        {"inventor_name_first": "Sam", "inventor_name_last": "Example"}
+      ],
+      "cpc_current": [
+        {"cpc_section": "B", "cpc_subclass": "64U"},
+        {"cpc_section": "F", "cpc_subclass": "41H"}
+      ]
+    }
+  ],
+  "count": 1,
+  "total_hits": 1
+}

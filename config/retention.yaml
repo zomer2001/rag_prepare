@@ -1,0 +1,27 @@
+# Retention / privacy policy (brief §2.8, §8).
+version: 1
+updated_at: "2026-08-03"
+
+defaults:
+  # Raw originals are append-only and kept for audit; platform terms may
+  # require shorter retention for social content (handled per source later).
+  raw_keep: forever
+  normalized_keep: forever
+  clean_keep: forever
+  dead_letter_retry_after_days: 7
+  review_queue_keep_days: 365
+
+social:
+  enabled_by_default: false          # no mass comment scraping in this phase
+  comment_sample_per_week: 0
+  display_name_policy: irreversible_hash
+  observations_snapshot_interval_days: 7
+
+privacy:
+  collect_personal_sensitive_data: false
+  face_recognition: false
+  cross_platform_identity_resolution: false
+
+licensing:
+  redistribute_raw_content: false    # research copies only, with provenance
+  store_pdf_fulltext: only_when_license_allows

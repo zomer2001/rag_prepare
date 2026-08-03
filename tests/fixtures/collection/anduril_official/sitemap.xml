@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+  <url>
+    <loc>https://www.anduril.com/subterranean</loc>
+    <lastmod>2026-05-01T00:00:00.000Z</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://www.anduril.com/news/anduril-unveils-roadrunner-m</loc>
+    <lastmod>2026-07-20T00:00:00.000Z</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <news:news>
+      <news:publication>
+        <news:name>Anduril</news:name>
+        <news:language>en</news:language>
+      </news:publication>
+      <news:publication_date>2026-07-20T00:00:00.000Z</news:publication_date>
+      <news:title>Anduril Unveils Roadrunner-M (fixture)</news:title>
+      <news:keywords>News,Products</news:keywords>
+    </news:news>
+  </url>
+  <url>
+    <loc>https://www.anduril.com/news/old-2023-post</loc>
+    <lastmod>2023-01-15T00:00:00.000Z</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <news:news>
+      <news:publication>
+        <news:name>Anduril</news:name>
+        <news:language>en</news:language>
+      </news:publication>
+      <news:publication_date>2023-01-15T00:00:00.000Z</news:publication_date>
+      <news:title>Old 2023 Post (fixture)</news:title>
+      <news:keywords>News</news:keywords>
+    </news:news>
+  </url>
+</urlset>

@@ -1,0 +1,46 @@
+# Query matrix (brief §3.2). Queries are data, not code. Search-engine
+# results yield discovery candidates ONLY — snippets are never a verified body.
+# Verified-effective queries from the 2026-08-03 live check are marked.
+version: 1
+updated_at: "2026-08-03"
+
+matrix:
+  - source: anduril_official
+    queries:
+      - '"Anduril Industries" site:anduril.com'
+      - 'site:anduril.com/news Anduril (contract OR award OR deliver)'
+      - 'site:anduril.com (Roadrunner OR Ghost OR Sentry OR Lattice)'
+
+  - source: usaspending
+    queries:
+      # Verified 2026-08-03: recipient_search_text=["Anduril Industries"] returns
+      # DoD awards for ANDURIL INDUSTRIES, INC. via the keyless API.
+      - 'recipient_search_text:["Anduril Industries"] award_type_codes:[A,B,C,D]'
+      - '"ANDURIL INDUSTRIES, INC." (award OR contract OR solicitation)'
+
+  - source: openalex
+    queries:
+      # Verified 2026-08-03: affiliation filter avoids the MATLAB "ANDURIL" noise.
+      - 'raw_affiliation_strings.search:Anduril Industries'
+      - '"Anduril" (affiliation) (autonomous OR counter-UAS OR Lattice)'
+
+  - source: patentsview
+    queries:
+      - 'assignees.assignee_organization text_phrase:"Anduril Industries"'
+      - '"Anduril" (assignee OR applicant OR inventor OR patent)'
+
+  - source: discovery_web
+    queries:
+      - '"Anduril" filetype:pdf (contract OR budget OR report)'
+      - '"Roadrunner-M" (contract OR test OR deployment)'
+      - '"Lattice" AND "Anduril" AND (Army OR Navy OR Air Force OR SOCOM)'
+      - 'site:gao.gov Anduril'
+      - 'site:crsreports.congress.gov Anduril'
+      - 'site:rand.org Anduril'
+      - 'site:youtube.com/@andurilindustries'
+
+# Reverse-expansion budget (brief §3.3): bounded fan-out, depth limit,
+# parent discovery ID recorded for every derived task.
+expansion:
+  max_candidates_per_record: 5
+  max_depth: 2

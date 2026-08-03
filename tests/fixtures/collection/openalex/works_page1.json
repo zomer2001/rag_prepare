@@ -1,0 +1,46 @@
+{
+  "meta": {"count": 2, "page": 1, "per_page": 50, "next_cursor": "*"},
+  "results": [
+    {
+      "id": "https://openalex.org/W999000111",
+      "doi": "https://doi.org/10.0000/fixture.111",
+      "title": "Distributed Command and Control for Attritable Autonomous Systems (fixture)",
+      "publication_date": "2025-04-02",
+      "cited_by_count": 3,
+      "abstract_inverted_index": {
+        "We": [0], "present": [1], "a": [2], "distributed": [3], "C2": [4],
+        "architecture": [5], "for": [6], "attritable": [7], "autonomous": [8],
+        "systems": [9]
+      },
+      "authorships": [
+        {
+          "author": {"id": "https://openalex.org/A1", "display_name": "Jane Fixture", "orcid": null},
+          "institutions": [{"id": "https://openalex.org/I1", "display_name": "Anduril Industries"}],
+          "raw_affiliation_strings": ["Anduril Industries, Costa Mesa, CA"]
+        }
+      ],
+      "primary_location": {
+        "source": {"display_name": "Fixture Defense Technology Letters"},
+        "landing_page_url": "https://example.org/fixture-111"
+      },
+      "open_access": {"is_oa": true, "oa_status": "gold"}
+    },
+    {
+      "id": "https://openalex.org/W999000222",
+      "doi": null,
+      "title": "Year-Only Date Fixture Memo on Lattice Sensor Fusion",
+      "publication_date": "2024",
+      "cited_by_count": 0,
+      "abstract_inverted_index": null,
+      "authorships": [
+        {
+          "author": {"id": "https://openalex.org/A2", "display_name": "John Fixture", "orcid": null},
+          "institutions": [{"id": "https://openalex.org/I1", "display_name": "Anduril Industries"}],
+          "raw_affiliation_strings": ["Anduril Industries"]
+        }
+      ],
+      "primary_location": {"source": {"display_name": "Fixture Workshop Notes"}, "landing_page_url": null},
+      "open_access": {"is_oa": false, "oa_status": "closed"}
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "spending_level": "awards",
+  "limit": 100,
+  "results": [
+    {
+      "internal_id": 359204966,
+      "Award ID": "W9128Z26FA005",
+      "Recipient Name": "ANDURIL INDUSTRIES, INC.",
+      "Start Date": "2026-03-16",
+      "End Date": "2027-03-15",
+      "Award Amount": 87713060.0,
+      "Total Outlays": null,
+      "Awarding Agency": "Department of Defense",
+      "Awarding Sub Agency": "Department of the Army",
+      "Contract Award Type": "DELIVERY ORDER",
+      "generated_internal_id": "CONT_AWD_W9128Z26FA005_9700_W9128Z26DA001_9700"
+    },
+    {
+      "internal_id": 349450950,
+      "Award ID": "W911W625F0020",
+      "Recipient Name": "ANDURIL INDUSTRIES, INC.",
+      "Start Date": "2025-05-16",
+      "End Date": "2025-12-31",
+      "Award Amount": 957500.0,
+      "Total Outlays": 0.0,
+      "Awarding Agency": "Department of Defense",
+      "Awarding Sub Agency": "Department of the Army",
+      "Contract Award Type": "DELIVERY ORDER",
+      "generated_internal_id": "CONT_AWD_W911W625F0020_9700_W911W624D0008_9700"
+    }
+  ],
+  "page_metadata": {"page": 1, "hasNext": false},
+  "messages": []
+}

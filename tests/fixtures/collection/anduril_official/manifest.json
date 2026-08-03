@@ -1,0 +1,6 @@
+{
+  "GET https://www.anduril.com/sitemap.xml": "sitemap.xml",
+  "GET https://www.anduril.com/news/anduril-unveils-roadrunner-m": "pages/roadrunner_m.html",
+  "GET https://www.anduril.com/subterranean": "pages/subterranean.html",
+  "GET https://www.anduril.com/news/old-2023-post": "pages/old_post.html"
+}

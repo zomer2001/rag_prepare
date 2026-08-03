@@ -1,0 +1,378 @@
+# Source registry for the Anduril OSINT collection pipeline.
+# Every policy block records WHEN robots/ToS were last checked by a human/agent.
+# Keys are read only from environment variables; never put secrets here.
+sources:
+  - source_id: anduril_official
+    name: Anduril Industries official site
+    publisher: Anduril Industries
+    authority_tier: P0
+    record_type: official_page
+    adapter: anduril_site
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [p0]
+    schedule_hint: daily
+    fixture_dir: anduril_official
+    entry:
+      sitemap: https://www.anduril.com/sitemap.xml
+      # Product seeds are query hints only, NOT a closed allowlist (brief §2.2).
+      product_seeds:
+        - lattice
+        - ghost
+        - roadrunner
+        - roadrunner-m
+        - sentry
+        - anvil
+        - dive-ld
+        - fury
+        - barracuda
+        - altius
+        - pulsar
+        - menace
+        - copperhead
+        - iris
+        - arsenal
+    policy:
+      robots_url: https://www.anduril.com/robots.txt
+      robots_checked_at: "2026-08-03"  # verified: "User-agent: * Disallow:" (all allowed)
+      allowed_methods: [GET]
+      rate_limit_seconds: 2.0
+      max_concurrency: 1
+      auth: none
+      content_license: "© Anduril Industries; research copy only, no redistribution"
+      notes: >
+        Next.js site; sitemap carries Google News namespace with titles and
+        publication dates. Prefer __NEXT_DATA__/JSON-LD when present.
+
+  - source_id: usaspending
+    name: USAspending award data
+    publisher: U.S. Department of the Treasury / USAspending
+    authority_tier: P0
+    record_type: contract
+    adapter: usaspending
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [p0]
+    schedule_hint: daily
+    fixture_dir: usaspending
+    entry:
+      search_url: https://api.usaspending.gov/api/v2/search/spending_by_award/
+      detail_url_template: https://api.usaspending.gov/api/v2/awards/{internal_id}/
+      recipient_aliases:
+        - Anduril Industries
+      default_since: "2017-06-01"
+    policy:
+      robots_checked_at: "2026-08-03"  # public API, documented, keyless
+      tos_url: https://www.usaspending.gov/about
+      tos_checked_at: "2026-08-03"
+      allowed_methods: [GET, POST]
+      rate_limit_seconds: 2.0
+      max_concurrency: 1
+      auth: none
+      content_license: "U.S. Government work / public data"
+      notes: >
+        spending_by_award paginates via page + page_metadata.hasNext; detail
+        endpoint separates potential value (ceiling) from obligation/outlay.
+        Award identity = generated_internal_id.
+
+  - source_id: openalex
+    name: OpenAlex scholarly works
+    publisher: OpenAlex (OurResearch)
+    authority_tier: P0
+    record_type: paper
+    adapter: openalex
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [p0]
+    schedule_hint: weekly
+    fixture_dir: openalex
+    entry:
+      works_url: https://api.openalex.org/works
+      affiliation_terms:
+        - Anduril Industries
+      per_page: 50
+      # mailto: set your contact to join the polite pool
+    policy:
+      robots_checked_at: "2026-08-03"  # REST API documented at docs.openalex.org
+      tos_url: https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication
+      tos_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 1.0
+      max_concurrency: 1
+      auth: none
+      content_license: "CC0 metadata; article PDFs only when OA license verified"
+      notes: >
+        Affiliation-first search (raw_affiliation_strings.search). A naive
+        full-text search hits the unrelated MATLAB toolbox "ANDURIL".
+
+  - source_id: patentsview
+    name: PatentsView (USPTO) patents
+    publisher: USPTO / PatentsView
+    authority_tier: P0
+    record_type: patent
+    adapter: patentsview
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [p0]
+    schedule_hint: weekly
+    fixture_dir: patentsview
+    entry:
+      api_url: https://search.patentsview.org/api/v1/patent/
+      assignee_terms:
+        - Anduril Industries
+        - Anduril Industries, Inc.
+    policy:
+      robots_checked_at: "2026-08-03"
+      tos_url: https://patentsview.org/apis/api-query-language
+      tos_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 2.0
+      max_concurrency: 1
+      auth: api_key_env
+      requires_api_key: true
+      api_key_env: PATENTSVIEW_API_KEY
+      content_license: "USPTO open data"
+      notes: >
+        Legacy api.patentsview.org query API is decommissioned (301 to USPTO
+        Open Data Portal, verified 2026-08-03). New search API needs a free
+        X-Api-Key. Without a key the adapter policy-skips; Google Patents is
+        used for discovery/manual reading only, not bulk scraping.
+
+  - source_id: defense_news
+    name: Defense News RSS
+    publisher: Defense News
+    authority_tier: P1
+    record_type: news
+    adapter: rss_feed
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [p1, news]
+    schedule_hint: daily
+    entry:
+      feeds:
+        - https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml
+      keywords: &anduril_news_keywords
+        - Anduril
+        - Roadrunner-M
+        - Menace-X
+        - Dive-LD
+        - Barracuda
+        - ALTIUS
+    policy:
+      robots_url: https://www.defensenews.com/robots.txt
+      robots_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 3.0
+      max_concurrency: 1
+      auth: none
+      content_license: "Defense News copyright; research copy only, no redistribution"
+      notes: "Arc RSS is discovery only; canonical article page is fetched as the body."
+
+  - source_id: the_war_zone
+    name: The War Zone RSS
+    publisher: The War Zone
+    authority_tier: P1
+    record_type: news
+    adapter: rss_feed
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [p1, news]
+    schedule_hint: daily
+    entry:
+      feeds:
+        - https://www.twz.com/feed
+      keywords: *anduril_news_keywords
+    policy:
+      robots_url: https://www.twz.com/robots.txt
+      robots_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 3.0
+      max_concurrency: 1
+      auth: none
+      content_license: "The War Zone copyright; research copy only, no redistribution"
+      notes: "RSS is discovery only; canonical article page is fetched as the body."
+
+  - source_id: defense_one
+    name: Defense One RSS
+    publisher: Defense One
+    authority_tier: P1
+    record_type: news
+    adapter: rss_feed
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [p1, news]
+    schedule_hint: daily
+    entry:
+      feeds:
+        - https://www.defenseone.com/rss/all/
+      keywords: *anduril_news_keywords
+    policy:
+      robots_url: https://www.defenseone.com/robots.txt
+      robots_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 3.0
+      max_concurrency: 1
+      auth: none
+      content_license: "Defense One copyright; research copy only, no redistribution"
+      notes: "RSS is discovery only; canonical article page is fetched as the body."
+
+  - source_id: rusi_publications
+    name: RUSI latest publications RSS
+    publisher: Royal United Services Institute
+    authority_tier: P1
+    record_type: think_tank
+    adapter: rss_feed
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [p1, think_tank]
+    schedule_hint: daily
+    entry:
+      feeds:
+        - https://www.rusi.org/rss/latest-publications.xml
+      keywords: *anduril_news_keywords
+    policy:
+      robots_url: https://www.rusi.org/robots.txt
+      robots_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 3.0
+      max_concurrency: 1
+      auth: none
+      content_license: "RUSI copyright; research copy only, no redistribution"
+      notes: "Latest-publications feed provides continuous monitoring, not full historical backfill."
+
+  - source_id: cset_publications
+    name: CSET publications RSS
+    publisher: Center for Security and Emerging Technology
+    authority_tier: P1
+    record_type: think_tank
+    adapter: rss_feed
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [p1, think_tank]
+    schedule_hint: daily
+    entry:
+      feeds:
+        - https://cset.georgetown.edu/feed/
+      keywords: *anduril_news_keywords
+    policy:
+      robots_url: https://cset.georgetown.edu/robots.txt
+      robots_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 3.0
+      max_concurrency: 1
+      auth: none
+      content_license: "CSET site terms apply; preserve source and report license metadata"
+      notes: "RSS provides continuous monitoring; report PDFs are fetched only when linked and permitted."
+
+  - source_id: defense_news_archive
+    name: Defense News historical sitemap backfill
+    publisher: Defense News
+    authority_tier: P1
+    record_type: news
+    adapter: sitemap_archive
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [archive, news_archive]
+    schedule_hint: manual
+    entry:
+      sitemaps:
+        - https://www.defensenews.com/arc/outboundfeeds/sitemap-index/?outputType=xml
+      url_keywords: &anduril_url_keywords
+        - anduril
+      include_prefixes:
+        - https://www.defensenews.com/
+      exclude_url_parts: [/search/, /preview/]
+      max_sitemaps: 20
+    policy:
+      robots_url: https://www.defensenews.com/robots.txt
+      robots_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 3.0
+      max_concurrency: 1
+      auth: none
+      content_license: "Defense News copyright; research copy only, no redistribution"
+      notes: "Uses publisher-declared sitemap; never calls robots-disallowed /search/."
+
+  - source_id: the_war_zone_archive
+    name: The War Zone historical sitemap backfill
+    publisher: The War Zone
+    authority_tier: P1
+    record_type: news
+    adapter: sitemap_archive
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [archive, news_archive]
+    schedule_hint: manual
+    entry:
+      sitemaps:
+        - https://www.twz.com/sitemap_index.xml
+      url_keywords: *anduril_url_keywords
+      include_prefixes:
+        - https://www.twz.com/
+      exclude_url_parts: [/wp-admin/, /preview]
+      max_sitemaps: 30
+    policy:
+      robots_url: https://www.twz.com/robots.txt
+      robots_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 3.0
+      max_concurrency: 1
+      auth: none
+      content_license: "The War Zone copyright; research copy only, no redistribution"
+      notes: "Uses publisher-declared WordPress sitemap index."
+
+  - source_id: rusi_archive
+    name: RUSI historical sitemap backfill
+    publisher: Royal United Services Institute
+    authority_tier: P1
+    record_type: think_tank
+    adapter: sitemap_archive
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [archive, think_tank_archive]
+    schedule_hint: manual
+    entry:
+      sitemaps:
+        - https://www.rusi.org/sitemap-index.xml
+      url_keywords: *anduril_url_keywords
+      include_prefixes:
+        - https://www.rusi.org/
+      exclude_url_parts: [/search]
+      max_sitemaps: 10
+    policy:
+      robots_url: https://www.rusi.org/robots.txt
+      robots_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 3.0
+      max_concurrency: 1
+      auth: none
+      content_license: "RUSI copyright; research copy only, no redistribution"
+      notes: "Direct sitemap backfill; does not scrape search-engine results."
+
+  - source_id: cset_archive
+    name: CSET historical sitemap backfill
+    publisher: Center for Security and Emerging Technology
+    authority_tier: P1
+    record_type: think_tank
+    adapter: sitemap_archive
+    adapter_version: 1.0.0
+    enabled: true
+    groups: [archive, think_tank_archive]
+    schedule_hint: manual
+    entry:
+      sitemaps:
+        - https://cset.georgetown.edu/sitemap_index.xml
+      url_keywords: *anduril_url_keywords
+      include_prefixes:
+        - https://cset.georgetown.edu/
+      exclude_url_parts: ["/?s=", "/search/"]
+      max_sitemaps: 30
+    policy:
+      robots_url: https://cset.georgetown.edu/robots.txt
+      robots_checked_at: "2026-08-03"
+      allowed_methods: [GET]
+      rate_limit_seconds: 3.0
+      max_concurrency: 1
+      auth: none
+      content_license: "CSET site terms apply; preserve source and report license metadata"
+      notes: "Uses declared sitemap and avoids robots-disallowed search URLs."

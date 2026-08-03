@@ -1,0 +1,16 @@
+{
+  "generated_unique_award_id": "CONT_AWD_W9128Z26FA005_9700_W9128Z26DA001_9700",
+  "piid": "W9128Z26FA005",
+  "type_description": "DELIVERY ORDER",
+  "description": "COUNTER-SMALL UNMANNED AIRCRAFT SYSTEM FIXTURE DESCRIPTION",
+  "total_obligation": 87713060.0,
+  "potential_award_amount": 175426120.0,
+  "total_outlay": 12500000.0,
+  "period_of_performance_start_date": "2026-03-16",
+  "period_of_performance_current_end_date": "2027-03-15",
+  "awarding_agency": {
+    "toptier_agency": {"name": "Department of Defense"},
+    "office_agency_name": "ACC FIXTURE OFFICE"
+  },
+  "recipient": {"recipient_name": "ANDURIL INDUSTRIES, INC.", "uei": "FIXTUREUEI123"}
+}

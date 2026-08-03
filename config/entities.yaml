@@ -1,0 +1,84 @@
+# Versioned seed entity table (brief §3.1). Candidates discovered from
+# high-trust sources go to entity_candidates first and are promoted only after
+# rule/manual review — never let an unverified alias pollute queries.
+version: 1
+updated_at: "2026-08-03"
+
+company_aliases:
+  - Anduril Industries
+  - Anduril Industries, Inc.
+  - ANDURIL INDUSTRIES, INC.   # as printed on USAspending awards (verified 2026-08-03)
+
+historical_names: []
+
+acquired_entities:
+  # Public reporting; each must be re-verified against official records before
+  # being used as a query seed in contract/patent searches.
+  - name: Blue Force Technologies
+    status: candidate
+    evidence: https://www.anduril.com/news/
+  - name: Dive Technologies
+    status: candidate
+    evidence: https://www.anduril.com/news/
+  - name: Area-I
+    status: candidate
+    evidence: https://www.anduril.com/news/
+  - name: Copious Imaging
+    status: candidate
+    evidence: https://www.anduril.com/news/
+  - name: Numerica (radar business)
+    status: candidate
+    evidence: https://www.anduril.com/news/
+
+# Government identifiers must carry source + validity window; a UEI found in
+# one search result is NOT permanently authoritative (brief §2.3).
+gov_identifiers:
+  - kind: UEI
+    value: null
+    status: unresolved
+    note: discover from SAM.gov/USAspending detail records, do not hardcode
+  - kind: CAGE
+    value: null
+    status: unresolved
+  - kind: DUNS
+    value: null
+    status: unresolved
+
+# Product seeds: query hints only, NOT a closed allowlist (brief §2.2).
+product_seeds:
+  - Lattice
+  - Ghost
+  - Roadrunner
+  - Roadrunner-M
+  - Sentry
+  - Anvil
+  - Dive-LD
+  - Fury
+  - Barracuda
+  - Altius
+  - Pulsar
+  - Menace
+  - Copperhead
+  - Iris
+  - Arsenal
+
+people:
+  # Public professional information only (brief §3.1).
+  - name: Palmer Luckey
+    role: founder
+  - name: Trae Stephens
+    role: founder
+  - name: Brian Schimpf
+    role: CEO
+
+customer_agencies:
+  - Department of Defense
+  - U.S. Army
+  - U.S. Navy
+  - U.S. Air Force
+  - U.S. Special Operations Command
+  - Department of Homeland Security
+  - UK Ministry of Defence
+  - Australian Department of Defence
+
+entity_candidates: []
