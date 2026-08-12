@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import re
 import shutil
 from pathlib import Path
 
 from qdrant_client import QdrantClient
 
-from rag_graph_demo.config import get_settings
+from rag_graph_demo.config import Settings, get_settings
+from rag_graph_demo.domain.tkg import TKGSnapshot
 from rag_graph_demo.lightrag_engine.local_models import embedding_model_name
+from rag_graph_demo.storage.neo4j_tkg_store import Neo4jTKGStore
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,7 +43,16 @@ def main() -> None:
         raise SystemExit("Reset cancelled. Re-run with --yes to confirm.")
 
     settings = get_settings()
-    for group in ("raw", "parsed", "registry", "lightrag", "exports", "logs"):
+    for group in (
+        "raw",
+        "parsed",
+        "registry",
+        "events",
+        "tkg",
+        "lightrag",
+        "exports",
+        "logs",
+    ):
         clear_directory(settings.data_dir / group)
 
     suffix = re.sub(
@@ -60,7 +72,25 @@ def main() -> None:
         if client.collection_exists(collection):
             client.delete_collection(collection)
             print(f"Deleted Qdrant collection: {collection}")
-    print("Local document registry and LightRAG state reset.")
+    if settings.neo4j_enabled:
+        asyncio.run(_clear_neo4j(settings))
+        print("Deleted project RagTKG nodes from Neo4j.")
+    print("Local document registry, events, TKG, and LightRAG state reset.")
+
+
+async def _clear_neo4j(settings: Settings) -> None:
+    store = Neo4jTKGStore(
+        settings.neo4j_uri,
+        settings.neo4j_user,
+        settings.neo4j_password,
+        database=settings.neo4j_database,
+    )
+    try:
+        await store.replace_snapshot(
+            TKGSnapshot(ontology_version=settings.tkg_ontology_version)
+        )
+    finally:
+        await store.close()
 
 
 if __name__ == "__main__":

@@ -26,4 +26,5 @@ data/benchmarks/*
 !data/**/.gitkeep
 
 qdrant_storage/
+neo4j_storage/
 models/

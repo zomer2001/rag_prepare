@@ -87,6 +87,18 @@ class Settings(BaseSettings):
     tkg_ontology_dir: Path = Path("ontology")
     tkg_registry_path: Path | None = None
     tkg_validate_shacl: bool = True
+    neo4j_enabled: bool = True
+    neo4j_required: bool = True
+    neo4j_uri: str = "bolt://127.0.0.1:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "rag-graph-demo-change-me"
+    neo4j_database: str = "neo4j"
+    entity_type_mapping_file: Path = Path("ontology/mappings/entity_types.json")
+    entity_resolution_enabled: bool = True
+    entity_resolution_candidate_limit: int = Field(default=5, ge=1, le=20)
+    entity_resolution_embedding_threshold: float = Field(default=0.72, ge=0, le=1)
+    entity_resolution_auto_match_threshold: float = Field(default=0.94, ge=0, le=1)
+    entity_resolution_llm_threshold: float = Field(default=0.78, ge=0, le=1)
 
     @field_validator("tkg_registry_path", mode="before")
     @classmethod

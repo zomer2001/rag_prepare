@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from neo4j import AsyncGraphDatabase
 from qdrant_client import QdrantClient
 
 from rag_graph_demo.config import get_settings
@@ -87,10 +88,42 @@ def _check_deepseek() -> dict[str, Any]:
         return {**result, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+async def _check_neo4j() -> dict[str, Any]:
+    settings = get_settings()
+    if not settings.neo4j_enabled:
+        return {"ok": None, "enabled": False}
+    driver = AsyncGraphDatabase.driver(
+        settings.neo4j_uri,
+        auth=(settings.neo4j_user, settings.neo4j_password),
+    )
+    try:
+        await driver.verify_connectivity()
+        async with driver.session(database=settings.neo4j_database) as session:
+            result = await session.run("MATCH (n:RagTKG) RETURN count(n) AS nodes")
+            row = await result.single()
+        return {
+            "ok": True,
+            "enabled": True,
+            "uri": settings.neo4j_uri,
+            "database": settings.neo4j_database,
+            "nodes": row["nodes"],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "enabled": True,
+            "uri": settings.neo4j_uri,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        await driver.close()
+
+
 async def build_diagnostics(*, check_qdrant: bool) -> dict[str, Any]:
     settings = get_settings()
     directories = [_check_directory(path) for path in settings.required_data_dirs]
     qdrant = await asyncio.to_thread(_check_qdrant) if check_qdrant else {"ok": None}
+    neo4j = await _check_neo4j()
     deepseek = await asyncio.to_thread(_check_deepseek)
     embedding_key_configured = {
         "local": True,
@@ -113,7 +146,12 @@ async def build_diagnostics(*, check_qdrant: bool) -> dict[str, Any]:
     }
     if not embedding["ok"]:
         embedding["error"] = f"{settings.embedding_provider.upper()}_API_KEY is not configured"
-    infrastructure_ready = all(item["ok"] for item in directories) and bool(qdrant["ok"])
+    neo4j_ready = not settings.neo4j_required or bool(neo4j["ok"])
+    infrastructure_ready = (
+        all(item["ok"] for item in directories)
+        and bool(qdrant["ok"])
+        and neo4j_ready
+    )
     ready = infrastructure_ready and bool(deepseek["ok"]) and bool(embedding["ok"])
 
     return {
@@ -129,6 +167,7 @@ async def build_diagnostics(*, check_qdrant: bool) -> dict[str, Any]:
         },
         "directories": directories,
         "qdrant": qdrant,
+        "neo4j": neo4j,
         "deepseek": deepseek,
         "embedding": embedding,
         "lightrag": {
