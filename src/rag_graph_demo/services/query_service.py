@@ -171,6 +171,14 @@ class QueryService:
                         f"{passage.metadata.get('event_summary') or ''} "
                         f"状态={passage.metadata.get('event_status') or 'unknown'}"
                     )
+                if passage.metadata.get("source") == "statement_tkg":
+                    event_description = (
+                        f"｜声明:{passage.metadata.get('statement')} "
+                        f"有效期={passage.metadata.get('valid_from') or '-'}.."
+                        f"{passage.metadata.get('valid_to') or '当前'} "
+                        f"状态={passage.metadata.get('status')} "
+                        f"来源立场={passage.metadata.get('stance')}"
+                    )
                 lines.append(
                     f"- {passage.channel}｜chunk={passage.chunk_id or '-'}"
                     f"{event_description}｜{excerpt}"

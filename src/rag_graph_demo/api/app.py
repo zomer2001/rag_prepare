@@ -13,6 +13,7 @@ from rag_graph_demo.api.routes.graph import router as graph_router
 from rag_graph_demo.api.routes.health import router as health_router
 from rag_graph_demo.api.routes.jobs import router as jobs_router
 from rag_graph_demo.api.routes.query import router as query_router
+from rag_graph_demo.api.routes.tkg import router as tkg_router
 from rag_graph_demo.config import get_settings
 from rag_graph_demo.domain.exceptions import (
     ApplicationError,
@@ -46,6 +47,7 @@ app.include_router(events_router, prefix="/api/v1", tags=["events"])
 app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
 app.include_router(query_router, prefix="/api/v1", tags=["query"])
 app.include_router(graph_router, prefix="/api/v1", tags=["graph"])
+app.include_router(tkg_router, prefix="/api/v1", tags=["tkg"])
 
 
 @app.exception_handler(ApplicationError)

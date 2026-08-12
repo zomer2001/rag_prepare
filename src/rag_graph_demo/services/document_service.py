@@ -19,6 +19,7 @@ from rag_graph_demo.domain.models import (
 from rag_graph_demo.ingestion.parser import DocumentParser
 from rag_graph_demo.lightrag_engine.engine import LightRAGEngine
 from rag_graph_demo.services.event_service import EventService
+from rag_graph_demo.services.tkg_fusion_service import TKGFusionService
 from rag_graph_demo.storage.document_registry import DocumentRegistry
 from rag_graph_demo.storage.file_store import FileStore, sanitize_filename
 from rag_graph_demo.storage.job_registry import JobRegistry
@@ -35,6 +36,7 @@ class DocumentService:
         parser: DocumentParser,
         engine: LightRAGEngine,
         event_service: EventService | None = None,
+        tkg_service: TKGFusionService | None = None,
     ) -> None:
         self._file_store = file_store
         self._registry = registry
@@ -42,6 +44,7 @@ class DocumentService:
         self._parser = parser
         self._engine = engine
         self._event_service = event_service
+        self._tkg_service = tkg_service
 
     async def create_upload(
         self,
@@ -113,6 +116,7 @@ class DocumentService:
             event_count = 0
             event_status = "pending"
             event_error: str | None = None
+            indexed_events = []
             if self._event_service is not None:
                 await self._jobs.update(job_id, JobStatus.RUNNING, "Extracting events")
                 await self._registry.update_status(
@@ -122,10 +126,10 @@ class DocumentService:
                     event_index_status="indexing",
                 )
                 try:
-                    events = await self._event_service.index_document(
+                    indexed_events = await self._event_service.index_document(
                         document_id, parsed.title, parsed.text
                     )
-                    event_count = len(events)
+                    event_count = len(indexed_events)
                     event_status = "ready"
                 except Exception as exc:
                     # The document RAG index is already valid. Keep it queryable and
@@ -133,6 +137,36 @@ class DocumentService:
                     logger.exception("Event extraction failed for %s", document_id)
                     event_status = "failed"
                     event_error = str(exc)
+            tkg_status = "pending"
+            tkg_entity_count = 0
+            tkg_assertion_count = 0
+            tkg_error: str | None = None
+            if self._tkg_service is not None:
+                await self._jobs.update(job_id, JobStatus.RUNNING, "Fusing statement-level TKG")
+                await self._registry.update_status(
+                    document_id,
+                    DocumentStatus.INDEXING,
+                    lightrag_track_id=track_id,
+                    event_index_status=event_status,
+                    event_count=event_count,
+                    event_error=event_error,
+                    tkg_index_status="indexing",
+                )
+                try:
+                    semantic = await self._engine.get_document_semantic_extraction(document_id)
+                    tkg_result = await self._tkg_service.index_document(
+                        document_id,
+                        parsed.title,
+                        semantic,
+                        indexed_events,
+                    )
+                    tkg_status = "ready"
+                    tkg_entity_count = tkg_result.entity_count
+                    tkg_assertion_count = tkg_result.assertion_count
+                except Exception as exc:
+                    logger.exception("TKG fusion failed for %s", document_id)
+                    tkg_status = "failed"
+                    tkg_error = str(exc)
             await self._registry.update_status(
                 document_id,
                 DocumentStatus.READY,
@@ -140,10 +174,16 @@ class DocumentService:
                 event_index_status=event_status,
                 event_count=event_count,
                 event_error=event_error,
+                tkg_index_status=tkg_status,
+                tkg_entity_count=tkg_entity_count,
+                tkg_assertion_count=tkg_assertion_count,
+                tkg_error=tkg_error,
             )
             message = "Document and events are ready"
             if event_status == "failed":
                 message = f"Document is ready; event extraction failed: {event_error}"
+            elif tkg_status == "failed":
+                message = f"Document and events are ready; TKG fusion failed: {tkg_error}"
             await self._jobs.update(job_id, JobStatus.SUCCEEDED, message)
         except ConfigurationError as exc:
             await self._registry.update_status(
@@ -171,6 +211,9 @@ class DocumentService:
         if self._event_service is not None:
             with suppress(Exception):
                 await self._event_service.delete_document(document_id)
+        if self._tkg_service is not None:
+            with suppress(Exception):
+                await self._tkg_service.delete_document(document_id)
         await self.index_document(document_id, job_id)
 
     async def delete_document(self, document_id: str) -> dict[str, object]:
@@ -181,6 +224,8 @@ class DocumentService:
             engine_result = await self._engine.delete_document(document_id)
         if self._event_service is not None:
             await self._event_service.delete_document(document_id)
+        if self._tkg_service is not None:
+            await self._tkg_service.delete_document(document_id)
         self._file_store.delete_document_files(document_id)
         await self._registry.delete(document_id)
         return {"document_id": document_id, "engine": engine_result}
@@ -205,6 +250,14 @@ class DocumentService:
             events = await self._event_service.index_document(
                 document_id, record.title, text
             )
+            if self._tkg_service is not None:
+                semantic = await self._engine.get_document_semantic_extraction(document_id)
+                await self._tkg_service.index_document(
+                    document_id,
+                    record.title,
+                    semantic,
+                    events,
+                )
             await self._registry.update_status(
                 document_id,
                 record.status,

@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     event_extraction_max_events: int = Field(default=12, ge=1, le=200)
     event_extraction_max_events_per_part: int = Field(default=5, ge=1, le=30)
     event_index_concurrency: int = Field(default=3, ge=1, le=8)
+    tkg_enabled: bool = True
+    tkg_ontology_version: str = "0.1.0"
+    tkg_ontology_dir: Path = Path("ontology")
+    tkg_registry_path: Path | None = None
+    tkg_validate_shacl: bool = True
+
+    @field_validator("tkg_registry_path", mode="before")
+    @classmethod
+    def empty_tkg_path_uses_default(cls, value: object) -> object:
+        return None if value == "" else value
 
     @property
     def effective_embedding_concurrency(self) -> int:
@@ -97,6 +107,7 @@ class Settings(BaseSettings):
                 "parsed",
                 "registry",
                 "events",
+                "tkg",
                 "lightrag",
                 "exports",
                 "logs",

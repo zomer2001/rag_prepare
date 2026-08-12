@@ -10,17 +10,24 @@ from rag_graph_demo.retrieval.orchestrator import UnifiedRetrievalOrchestrator
 from rag_graph_demo.retrieval.planner import QueryPlanner
 from rag_graph_demo.services.document_service import DocumentService
 from rag_graph_demo.services.event_service import EventService, LLMEventExtractor
+from rag_graph_demo.services.ontology_service import OntologyService
 from rag_graph_demo.services.query_service import QueryService
+from rag_graph_demo.services.tkg_fusion_service import TKGFusionService
 from rag_graph_demo.storage.document_registry import DocumentRegistry
 from rag_graph_demo.storage.event_registry import EventRegistry
 from rag_graph_demo.storage.file_store import FileStore
 from rag_graph_demo.storage.job_registry import JobRegistry
+from rag_graph_demo.storage.tkg_registry import TKGRegistry
 
 
 class AppContainer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.settings.ensure_data_dirs()
+        self.ontology_service = OntologyService(settings.tkg_ontology_dir)
+        if settings.tkg_enabled and settings.tkg_validate_shacl:
+            # Fail fast on a damaged or syntactically invalid versioned schema.
+            self.ontology_service.load_schema()
         self.documents_registry = DocumentRegistry(
             settings.data_dir / "registry" / "documents.json"
         )
@@ -47,6 +54,19 @@ class AppContainer:
             else None
         )
         self.event_service = EventService(self.events_registry, event_extractor)
+        self.tkg_registry = TKGRegistry(
+            settings.tkg_registry_path or settings.data_dir / "tkg" / "tkg_store.json",
+            ontology_version=settings.tkg_ontology_version,
+            validate_snapshot=(
+                self.ontology_service.validate_snapshot
+                if settings.tkg_validate_shacl
+                else None
+            ),
+        )
+        self.tkg_service = TKGFusionService(
+            self.tkg_registry,
+            ontology_version=settings.tkg_ontology_version,
+        )
         self.query_planner = QueryPlanner(
             self.engine.complete_extraction,
             cache_path=settings.data_dir / "events" / "query_plan_cache.json",
@@ -66,6 +86,7 @@ class AppContainer:
             self.query_planner,
             event_service=self.event_service,
             event_vector_index=self.event_vector_index,
+            tkg_registry=self.tkg_registry if settings.tkg_enabled else None,
         )
         self.document_service = DocumentService(
             self.file_store,
@@ -74,6 +95,7 @@ class AppContainer:
             DocumentParser(ocr_enabled=settings.parser_ocr_enabled),
             self.engine,
             self.event_service if settings.event_extraction_enabled else None,
+            self.tkg_service if settings.tkg_enabled else None,
         )
         self.query_service = QueryService(
             self.engine,

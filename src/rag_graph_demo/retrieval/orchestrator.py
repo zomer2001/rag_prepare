@@ -9,6 +9,7 @@ from time import perf_counter
 from typing import Any
 
 from rag_graph_demo.domain.events import EventQueryRequest, EventQueryResponse
+from rag_graph_demo.domain.tkg import TKGQueryRequest
 from rag_graph_demo.lightrag_engine.engine import LightRAGEngine
 from rag_graph_demo.retrieval.event_vector import EventVectorIndex
 from rag_graph_demo.retrieval.fusion import fuse_evidence
@@ -20,6 +21,7 @@ from rag_graph_demo.retrieval.models import (
 )
 from rag_graph_demo.retrieval.planner import QueryPlanner
 from rag_graph_demo.services.event_service import EventService
+from rag_graph_demo.storage.tkg_registry import TKGRegistry
 
 DocumentIdResolver = Callable[[str, str], str | None]
 SOURCE_DOCUMENT_PATTERN = re.compile(
@@ -46,6 +48,7 @@ class UnifiedRetrievalOrchestrator:
         *,
         event_service: EventService | None = None,
         event_vector_index: EventVectorIndex | None = None,
+        tkg_registry: TKGRegistry | None = None,
         document_id_resolver: DocumentIdResolver = default_document_id_resolver,
         strict_event_failures: bool = False,
         max_sources_per_event: int = 2,
@@ -54,6 +57,7 @@ class UnifiedRetrievalOrchestrator:
         self._planner = planner
         self._event_service = event_service
         self._event_vector_index = event_vector_index
+        self._tkg_registry = tkg_registry
         self._document_id_resolver = document_id_resolver
         self._strict_event_failures = strict_event_failures
         self._max_sources_per_event = max(1, max_sources_per_event)
@@ -88,14 +92,18 @@ class UnifiedRetrievalOrchestrator:
             event_task = self._retrieve_events_safely(question, plan, candidate_limit)
         else:
             event_task = asyncio.sleep(0, result=([], None, None))
-        vector_raw, graph_raw, event_output = await asyncio.gather(
+        tkg_task = self._retrieve_tkg_graph_candidates(plan, candidate_limit)
+        vector_raw, graph_raw, event_output, tkg_candidates = await asyncio.gather(
             vector_task,
             graph_task,
             event_task,
+            tkg_task,
         )
         event_candidates, event_result, event_error = event_output
         vector_candidates = self._light_candidates(vector_raw, "vector")
-        graph_candidates = self._light_candidates(graph_raw, "graph")
+        graph_candidates = self._merge_graph_candidates(
+            self._light_candidates(graph_raw, "graph"), tkg_candidates
+        )
         channel_candidates: dict[str, list[EvidenceCandidate]] = {
             "vector": vector_candidates,
             "graph": graph_candidates,
@@ -118,9 +126,106 @@ class UnifiedRetrievalOrchestrator:
                 "candidate_limit_per_path": candidate_limit,
                 "include_events": include_events,
                 "event_error": event_error,
+                "tkg_assertion_candidates": len(tkg_candidates),
                 "elapsed_ms": int((perf_counter() - started) * 1_000),
             },
         )
+
+    async def _retrieve_tkg_graph_candidates(
+        self,
+        plan: QueryPlan,
+        candidate_limit: int,
+    ) -> list[EvidenceCandidate]:
+        if self._tkg_registry is None or not plan.entities:
+            return []
+        candidates: list[EvidenceCandidate] = []
+        seen_mentions: set[str] = set()
+        for entity_name in plan.entities:
+            result = await self._tkg_registry.query(
+                TKGQueryRequest(
+                    entity_name=entity_name,
+                    include_disputed=True,
+                    limit=candidate_limit,
+                )
+            )
+            assertions = {item.assertion_id: item for item in result.assertions}
+            entities = {item.entity_id: item for item in result.entities}
+            effects = {}
+            for effect in result.effects:
+                effects.setdefault(effect.assertion_id, []).append(effect)
+            conflicts = {
+                assertion_id
+                for conflict in result.conflicts
+                for assertion_id in conflict.assertion_ids
+            }
+            for mention in result.mentions:
+                if mention.mention_id in seen_mentions:
+                    continue
+                assertion = assertions.get(mention.assertion_id)
+                if assertion is None:
+                    continue
+                seen_mentions.add(mention.mention_id)
+                subject = entities.get(assertion.subject_id)
+                obj = entities.get(assertion.object_id)
+                candidates.append(
+                    EvidenceCandidate(
+                        evidence_id=f"graph:tkg:{mention.mention_id}",
+                        channel="graph",
+                        rank=len(candidates) + 1,
+                        document_id=mention.document_id,
+                        chunk_id=mention.source_segment_id,
+                        text=mention.evidence_text,
+                        score=assertion.confidence,
+                        metadata={
+                            "source": "statement_tkg",
+                            "assertion_id": assertion.assertion_id,
+                            "statement": (
+                                f"{subject.canonical_name if subject else assertion.subject_id} "
+                                f"{assertion.predicate_id} "
+                                f"{obj.canonical_name if obj else assertion.object_id}"
+                            ),
+                            "valid_from": assertion.valid_from,
+                            "valid_to": assertion.valid_to,
+                            "status": assertion.status.value,
+                            "stance": mention.stance.value,
+                            "event_effects": [
+                                item.effect_type.value
+                                for item in effects.get(assertion.assertion_id, [])
+                            ],
+                            "conflicted": assertion.assertion_id in conflicts,
+                        },
+                    )
+                )
+                if len(candidates) >= candidate_limit:
+                    return candidates
+        return candidates
+
+    @staticmethod
+    def _merge_graph_candidates(
+        base: list[EvidenceCandidate],
+        tkg: list[EvidenceCandidate],
+    ) -> list[EvidenceCandidate]:
+        merged: list[EvidenceCandidate] = []
+        seen: set[tuple[str | None, str]] = set()
+        for item in [*tkg, *base]:
+            key = (item.document_id, item.text.strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(
+                EvidenceCandidate(
+                    evidence_id=item.evidence_id,
+                    channel=item.channel,
+                    rank=len(merged) + 1,
+                    document_id=item.document_id,
+                    chunk_id=item.chunk_id,
+                    text=item.text,
+                    file_path=item.file_path,
+                    score=item.score,
+                    metadata=item.metadata,
+                )
+            )
+        return merged
 
     async def _retrieve_events_safely(
         self,

@@ -32,6 +32,8 @@
 - FastAPI、Streamlit、批量导入、全量重建、诊断和 Smoke Test。
 - 统一 Query Planner，以及文本向量、语义图谱、事件向量三路可回溯证据融合。
 - 事件抽取、跨文档合并、来源段绑定、时间线、立场冲突检测和事件增强问答。
+- 静态领域本体（OWL/SHACL）及声明级 TKG：统一 Entity ID，保留 Entity/Assertion/Event
+  Mention、来源立场、事实有效期、冲突和事件作用轨迹。
 
 统一检索器显式调用 LightRAG `naive` 文本向量和 `hybrid` 语义图谱两路，再与独立事件
 向量通路做文档级 RRF；评测和在线回答使用同一批最终证据。
@@ -45,11 +47,11 @@
 | Qdrant | Docker/Colima | `127.0.0.1:6333` |
 | Embedding | macOS 本地进程、智谱或百炼 API | 默认 Qwen3 Embedding 0.6B |
 | Reranker | macOS 本地进程，可关闭 | BGE Reranker v2 M3 |
-| 图存储 | 本地文件 | NetworkX GraphML |
+| 图存储 | 本地文件 | NetworkX GraphML + 声明级 TKG JSON；Neo4j 可选投影 |
 | LLM | DeepSeek API | `deepseek-v4-flash` |
 
-第一版只需要一个数据库容器：Qdrant。无需安装 Neo4j、PostgreSQL、Redis 或
-Elasticsearch。
+默认仍只需要一个数据库容器：Qdrant。声明级 TKG 先使用本地原子 JSON 验证模型；
+Neo4j 是可选的查询投影，不是索引前置条件。
 
 ## 首次启动
 
@@ -203,6 +205,8 @@ docker-compose down
 | `GET` | `/api/v1/events` | 列出规范化事件 |
 | `POST` | `/api/v1/events/query` | 按问题、实体和时间查询事件链 |
 | `POST` | `/api/v1/documents/{id}/events/rebuild` | 单独重建文档事件 |
+| `GET` | `/api/v1/tkg` | 查看声明级 TKG 快照与融合轨迹 |
+| `POST` | `/api/v1/tkg/query` | 按实体、关系和有效时间查询声明 |
 
 ## 数据目录
 
@@ -212,6 +216,7 @@ data/
 ├── parsed/     # 规范化 Markdown 和来源 Sidecar
 ├── registry/   # 文档与任务注册表
 ├── events/     # 事件、提及、时间关系和冲突
+├── tkg/        # 统一实体、声明、来源立场、有效期、事件作用与冲突
 ├── lightrag/   # NetworkX、LightRAG KV 和状态
 ├── exports/
 └── logs/

@@ -265,6 +265,74 @@ class FakeDocStatus:
         return [self.values.get(item) for item in ids]
 
 
+class SemanticFakeGraph:
+    async def get_all_nodes(self):
+        return [
+            {
+                "id": "Acme",
+                "entity_type": "Organization",
+                "description": "Aggregated description from multiple sources.",
+                "source_id": "chunk-other<SEP>chunk-doc-1",
+                "file_path": "doc-other__other.md<SEP>doc-1__news.md",
+            },
+            {
+                "id": "Lattice",
+                "entity_type": "Model",
+                "description": "Aggregated model description.",
+                "source_id": "chunk-doc-1",
+                "file_path": "doc-1__news.md",
+            },
+        ]
+
+    async def get_all_edges(self):
+        return [
+            {
+                "source": "Acme",
+                "target": "Lattice",
+                "description": "Aggregated relation description.",
+                "keywords": "development",
+                "source_id": "chunk-other<SEP>chunk-doc-1",
+                "file_path": "doc-other__other.md<SEP>doc-1__news.md",
+            }
+        ]
+
+
+class SemanticFakeChunks:
+    async def get_by_ids(self, ids):
+        values = {
+            "chunk-other": {
+                "content": "Other source text.",
+                "file_path": "doc-other__other.md",
+            },
+            "chunk-doc-1": {
+                "content": "Acme develops Lattice in the source chunk.",
+                "file_path": "doc-1__news.md",
+            },
+        }
+        return [values.get(item) for item in ids]
+
+
+class SemanticFakeRag:
+    chunk_entity_relation_graph = SemanticFakeGraph()
+    text_chunks = SemanticFakeChunks()
+
+
+@pytest.mark.asyncio
+async def test_semantic_extraction_uses_document_chunk_as_mention_evidence(tmp_path) -> None:
+    settings = Settings(_env_file=None, deepseek_api_key="test")
+    mapper = SourceMapper(DocumentRegistry(tmp_path / "documents.json"))
+    engine = LightRAGEngine(settings, mapper)
+    engine._rag = SemanticFakeRag()
+
+    result = await engine.get_document_semantic_extraction("doc-1")
+
+    assert result.entities[0].description == "Acme develops Lattice in the source chunk."
+    assert result.relationships[0].description == (
+        "Acme develops Lattice in the source chunk."
+    )
+    assert result.relationships[0].source_segment_id == "chunk-doc-1"
+
+
 class ResumableFakeRag(FakeRag):
     def __init__(self) -> None:
         super().__init__(DocStatus.PROCESSED)

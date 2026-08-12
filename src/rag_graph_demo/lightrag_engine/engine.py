@@ -18,6 +18,11 @@ from openai import APIConnectionError, APITimeoutError, InternalServerError, Rat
 from rag_graph_demo.config import Settings
 from rag_graph_demo.domain.exceptions import ConfigurationError, EngineNotReadyError
 from rag_graph_demo.domain.models import Citation, QueryRequest, QueryResponse
+from rag_graph_demo.domain.tkg import (
+    SemanticEntityCandidate,
+    SemanticExtractionBatch,
+    SemanticRelationshipCandidate,
+)
 from rag_graph_demo.ingestion.source_mapper import SourceMapper
 from rag_graph_demo.lightrag_engine.local_models import (
     build_embedding_func,
@@ -27,6 +32,37 @@ from rag_graph_demo.lightrag_engine.local_models import (
 REFERENCE_LINE_PATTERN = re.compile(r"(?m)^(?P<prefix>\s*[-*]\s*\[(?P<id>\d+)\]\s+).*$")
 logger = logging.getLogger(__name__)
 ExtractionProfile = Literal["default", "light_entity"]
+
+
+def _first_source_id(value: Any) -> str | None:
+    source = str(value or "").split("<SEP>", maxsplit=1)[0].strip()
+    return source or None
+
+
+def _source_ids(value: Any) -> list[str]:
+    return [item.strip() for item in str(value or "").split("<SEP>") if item.strip()]
+
+
+def _source_evidence(value: dict[str, Any], chunks: dict[str, str]) -> str:
+    return next(
+        (
+            chunks[source_id][:4_000]
+            for source_id in _source_ids(value.get("source_id"))
+            if source_id in chunks
+        ),
+        "",
+    )
+
+
+def _source_segment_id(value: dict[str, Any], chunks: dict[str, str]) -> str | None:
+    return next(
+        (
+            source_id
+            for source_id in _source_ids(value.get("source_id"))
+            if source_id in chunks
+        ),
+        None,
+    )
 
 
 def _doc_status_value(status: Any) -> DocStatus:
@@ -458,6 +494,82 @@ class LightRAGEngine:
         """Expose the configured embedding model to sibling retrieval indexes."""
         rag = await self.initialize()
         return await rag.embedding_func(texts, context=context)
+
+    async def get_document_semantic_extraction(
+        self, document_id: str
+    ) -> SemanticExtractionBatch:
+        """Read the entities/relations that LightRAG already extracted for one document.
+
+        This is intentionally post-index: the TKG layer consumes the same semantic
+        extraction as the existing graph path and does not make a duplicate LLM call.
+        """
+        rag = await self.initialize()
+        graph = rag.chunk_entity_relation_graph
+        file_marker = f"{document_id}__"
+        nodes = await graph.get_all_nodes()
+        edges = await graph.get_all_edges()
+        source_ids = {
+            source_id
+            for value in [*nodes, *edges]
+            for source_id in _source_ids(value.get("source_id"))
+        }
+        sorted_source_ids = sorted(source_ids)
+        chunks = (
+            await rag.text_chunks.get_by_ids(sorted_source_ids)
+            if sorted_source_ids
+            else []
+        )
+        chunk_content = {
+            source_id: str(chunk.get("content") or "")
+            for source_id, chunk in zip(sorted_source_ids, chunks, strict=True)
+            if chunk
+            and file_marker in str(chunk.get("file_path") or "")
+            and str(chunk.get("content") or "").strip()
+        }
+        document_nodes = [
+            node for node in nodes if file_marker in str(node.get("file_path") or "")
+        ]
+        retained_names = {
+            str(node.get("id") or node.get("entity_id") or "")
+            for node in document_nodes
+        }
+        entities = [
+            SemanticEntityCandidate(
+                name=str(node.get("id") or node.get("entity_id") or ""),
+                entity_type=str(node.get("entity_type") or "Concept"),
+                description=_source_evidence(node, chunk_content)
+                or str(node.get("description") or node.get("id") or ""),
+                source_segment_id=_source_segment_id(node, chunk_content)
+                or _first_source_id(node.get("source_id")),
+            )
+            for node in document_nodes
+            if str(node.get("id") or node.get("entity_id") or "").strip()
+        ]
+        relationships = []
+        for edge in edges:
+            if file_marker not in str(edge.get("file_path") or ""):
+                continue
+            source = str(edge.get("source") or "")
+            target = str(edge.get("target") or "")
+            if source not in retained_names or target not in retained_names:
+                continue
+            description = _source_evidence(edge, chunk_content)
+            if not description:
+                description = str(edge.get("description") or "").strip()
+            if not description:
+                continue
+            relationships.append(
+                SemanticRelationshipCandidate(
+                    source=source,
+                    target=target,
+                    predicate=str(edge.get("keywords") or "relatedFact"),
+                    description=description,
+                    confidence=min(1.0, max(0.0, float(edge.get("weight") or 0.65))),
+                    source_segment_id=_source_segment_id(edge, chunk_content)
+                    or _first_source_id(edge.get("source_id")),
+                )
+            )
+        return SemanticExtractionBatch(entities=entities, relationships=relationships)
 
     async def complete_query(
         self,

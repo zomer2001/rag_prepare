@@ -13,6 +13,11 @@ from rag_graph_demo.domain.events import (
     EventRecord,
 )
 from rag_graph_demo.domain.models import DocumentRecord, QueryRequest
+from rag_graph_demo.domain.tkg import (
+    SemanticEntityCandidate,
+    SemanticExtractionBatch,
+    SemanticRelationshipCandidate,
+)
 from rag_graph_demo.retrieval.event_vector import EventVectorIndex
 from rag_graph_demo.retrieval.fusion import fuse_evidence
 from rag_graph_demo.retrieval.models import (
@@ -27,7 +32,9 @@ from rag_graph_demo.retrieval.planner import (
     QueryPlanner,
 )
 from rag_graph_demo.services.query_service import QueryService
+from rag_graph_demo.services.tkg_fusion_service import TKGFusionService
 from rag_graph_demo.storage.document_registry import DocumentRegistry
+from rag_graph_demo.storage.tkg_registry import TKGRegistry
 
 
 @pytest.mark.asyncio
@@ -356,6 +363,57 @@ async def test_orchestrator_runs_three_paths_with_shared_plan() -> None:
     assert result.bundles[0].channels == ("vector", "graph", "event")
     assert result.candidates["event"][0].chunk_id == "doc-a::event-part-1"
     assert result.graph_data["entities"][0]["entity_name"] == "Anduril"
+
+
+@pytest.mark.asyncio
+async def test_statement_tkg_augments_existing_graph_path_without_fourth_channel(
+    tmp_path,
+) -> None:
+    registry = TKGRegistry(tmp_path / "tkg.json", ontology_version="0.1.0")
+    fusion = TKGFusionService(registry, ontology_version="0.1.0")
+    await fusion.index_document(
+        "doc-tkg",
+        "合作公告",
+        SemanticExtractionBatch(
+            entities=[
+                SemanticEntityCandidate(
+                    name="Anduril",
+                    entity_type="Organization",
+                    description="Anduril is a company.",
+                ),
+                SemanticEntityCandidate(
+                    name="Meta",
+                    entity_type="Organization",
+                    description="Meta is a company.",
+                ),
+            ],
+            relationships=[
+                SemanticRelationshipCandidate(
+                    source="Anduril",
+                    target="Meta",
+                    predicate="partnership",
+                    description="Anduril 与 Meta 建立合作。",
+                )
+            ],
+        ),
+        [],
+    )
+    orchestrator = UnifiedRetrievalOrchestrator(
+        FakeRetrievalEngine(),  # type: ignore[arg-type]
+        FakePlanner(),  # type: ignore[arg-type]
+        tkg_registry=registry,
+    )
+
+    result = await orchestrator.retrieve("Anduril 与谁合作？", top_k=3, include_events=False)
+
+    tkg_candidate = next(
+        item
+        for item in result.candidates["graph"]
+        if item.metadata.get("source") == "statement_tkg"
+    )
+    assert tkg_candidate.document_id == "doc-tkg"
+    assert tkg_candidate.metadata["statement"] == "Anduril partnersWith Meta"
+    assert set(result.candidates) == {"vector", "graph", "event"}
 
 
 @pytest.mark.asyncio

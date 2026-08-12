@@ -45,6 +45,10 @@ class DocumentRecord(BaseModel):
     event_index_status: Literal["pending", "indexing", "ready", "failed"] = "pending"
     event_count: int = 0
     event_error: str | None = None
+    tkg_index_status: Literal["pending", "indexing", "ready", "failed"] = "pending"
+    tkg_entity_count: int = 0
+    tkg_assertion_count: int = 0
+    tkg_error: str | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
