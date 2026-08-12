@@ -1,0 +1,30 @@
+[
+  {
+    "query_id": "smoke-1",
+    "question": "What happened after Alpha Systems received the contract?",
+    "question_type": "temporal_query",
+    "answer": "It deployed autonomous sensing equipment.",
+    "gold_evidence": [
+      {
+        "document_id": "doc-alpha",
+        "text": "The government awarded Alpha Systems a contract in January 2025."
+      },
+      {
+        "document_id": "doc-beta",
+        "text": "Alpha Systems deployed the autonomous sensing equipment in March 2025."
+      }
+    ]
+  },
+  {
+    "query_id": "smoke-2",
+    "question": "Which equipment did the Alpha Systems contract cover?",
+    "question_type": "inference_query",
+    "answer": "Autonomous sensing equipment.",
+    "gold_evidence": [
+      {
+        "document_id": "doc-alpha",
+        "text": "The contract covers autonomous sensing equipment."
+      }
+    ]
+  }
+]

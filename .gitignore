@@ -9,6 +9,10 @@ __pycache__/
 .streamlit/
 .coverage
 htmlcov/
+.pytest-upload-check.log
+.ppt-*/
+.~*
+*.inspect.ndjson
 
 data/raw/*
 data/parsed/*
@@ -18,6 +22,7 @@ data/lightrag/*
 data/exports/*
 data/logs/*
 data/collection/*
+data/benchmarks/*
 !data/**/.gitkeep
 
 qdrant_storage/

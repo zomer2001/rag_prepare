@@ -1,0 +1,23 @@
+[
+  {
+    "document_id": "doc-alpha",
+    "title": "Alpha contract",
+    "source": "Example News",
+    "published_at": "2025-01-10",
+    "body": "The government awarded Alpha Systems a contract in January 2025. The contract covers autonomous sensing equipment."
+  },
+  {
+    "document_id": "doc-beta",
+    "title": "Beta deployment",
+    "source": "Example News",
+    "published_at": "2025-03-15",
+    "body": "Alpha Systems deployed the autonomous sensing equipment in March 2025. The deployment followed the January contract award."
+  },
+  {
+    "document_id": "doc-noise",
+    "title": "Unrelated market report",
+    "source": "Market Daily",
+    "published_at": "2025-04-01",
+    "body": "A retail company announced quarterly earnings and opened two new stores."
+  }
+]

@@ -1,0 +1,84 @@
+entity_types_guidance: |-
+  Select only the absolute critical, stable retrieval anchors of this chunk for a
+  scientific knowledge graph. This is not exhaustive named-entity recognition.
+  Return the smallest set without which the chunk's central factual claim or an
+  indispensable multi-hop reasoning chain could not be represented.
+
+  An entity is eligible only when it is explicitly named, denotes a stable real-world
+  or scientific object, and satisfies at least one of these conditions:
+  - it is a central object of the passage;
+  - the passage explicitly defines or characterizes it;
+  - it participates in a high-value factual relationship needed for retrieval or
+    multi-hop reasoning.
+
+  If removing a candidate would not break or materially weaken the chunk's central
+  factual claim, omit it even when the name is explicit, domain-relevant or repeated.
+  Use only these types:
+
+  - Person: a named person only when their identity or role is central to the claim.
+  - Organization: a named institution, company, laboratory, journal, or project team.
+  - Location: a named geographic place or facility when location is meaningful.
+  - ResearchObject: a named theory, task, system, product, standard, protocol, or study.
+  - Method: a named algorithm, technique, process, procedure, or experimental method.
+  - Model: a named model, architecture, framework, or model version.
+  - Dataset: a named dataset, benchmark, corpus, database, or data release.
+  - Material: a named chemical, material, biological entity, sample, or compound.
+  - Device: a named instrument, sensor, apparatus, platform, or hardware system.
+  - Concept: only a technical concept, property, metric, or phenomenon explicitly
+    defined or treated as a central research object in the passage.
+
+  Selection and relation rules:
+  1. Omit events, releases, experiments, observations, decisions, corrections and
+     other occurrences; the independent event pathway represents them.
+  2. Omit headings, broad topics, generic nouns, vague phrases, isolated one-off names,
+     ordinary cited authors, supporting examples, peripheral organizations and entities
+     retained only because they co-occur. Named does not mean graph-worthy.
+  3. Dates, versions, units, amounts, identifiers and metric values are attributes, not
+     entities, unless they name a materially distinct model, dataset, standard or product.
+  4. Use one evidence-supported canonical name. Preserve an explicitly defined
+     abbreviation with its full name and distinguish true homonyms or material versions.
+  5. Keep only relationships indispensable to the chunk's central factual structure:
+     identity/taxonomy,
+     composition, affiliation, development/production, usage, evaluation/measurement,
+     evidence support/contradiction, correction/supersession, explicit causality, temporal
+     order or meaningful location. Both endpoints must be retained critical entities.
+  6. Co-occurrence is not a relationship. Never output related_to, associated_with,
+     mentioned_with or another generic edge.
+  7. Descriptions may retain all evidence-supported detail needed to understand the
+     entity or relationship; do not invent missing facts.
+  8. Return at most 4 entities and at most 4 relationships. These are upper bounds, not
+     targets. Order both arrays from most to least important because only the first four
+     valid items are retained. Return empty arrays when the passage contains no critical
+     graph knowledge.
+
+entity_extraction_json_examples:
+  - |-
+    {
+      "entities": [
+        {
+          "name": "LightRAG",
+          "type": "Model",
+          "description": "LightRAG is the graph-based retrieval system evaluated in the study."
+        },
+        {
+          "name": "MultiHop-RAG",
+          "type": "Dataset",
+          "description": "MultiHop-RAG is the benchmark used to evaluate multi-hop retrieval."
+        }
+      ],
+      "relationships": [
+        {
+          "source": "LightRAG",
+          "target": "MultiHop-RAG",
+          "keywords": "evaluation, benchmark usage",
+          "description": "The study evaluates LightRAG on the MultiHop-RAG benchmark."
+        }
+      ]
+    }
+
+entity_extraction_examples:
+  - |-
+    entity<|>LightRAG<|>Model<|>LightRAG is the graph-based retrieval system evaluated in the study.
+    entity<|>MultiHop-RAG<|>Dataset<|>MultiHop-RAG is the benchmark used to evaluate multi-hop retrieval.
+    relation<|>LightRAG<|>MultiHop-RAG<|>evaluation, benchmark usage<|>The study evaluates LightRAG on the MultiHop-RAG benchmark.
+    <|COMPLETE|>

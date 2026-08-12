@@ -9,25 +9,32 @@
 - [`PROJECT_PLAN.md`](PROJECT_PLAN.md)：初始架构与选型论证。
 - [`TECHNICAL_REPORT.md`](TECHNICAL_REPORT.md)：当前架构、三通路索引、查询协同、
   存储、验证和演进路线。
+- [`THREE_PATH_FUSION_TECHNICAL_REPORT.md`](THREE_PATH_FUSION_TECHNICAL_REPORT.md)：
+  文本向量、语义图谱和事件三路从索引、召回到文档级证据融合的专项技术报告。
 - [`RUNBOOK.md`](RUNBOOK.md)：可逐行执行的采集、索引、事件补建、验收和恢复流程。
 - [`USER_GUIDE.md`](USER_GUIDE.md)：启动、导入、索引、查询、Prompt 定制和 Agent 接入。
 - [`EVENT_PATHWAY.md`](EVENT_PATHWAY.md)：事件通路的实现、数据模型、API、运行方式和边界。
+- [`EVALUATION_RUNBOOK.md`](EVALUATION_RUNBOOK.md)：Naive、Hybrid、官方 LightRAG、
+  `light_entity` 与 `ours` 的一键评测、数据格式、指标和断点续跑。
 
 ## 已实现能力
 
 - 上传、去重、删除和重新索引 Markdown、DOCX、文字型 PDF。
 - 文档解析任务状态、错误信息和解析结果预览。
 - LightRAG `naive`、`local`、`global`、`hybrid`、`mix` 五种模式。
-- 本地 `Qwen/Qwen3-Embedding-0.6B` Embedding 和可选 BGE Reranker。
+- 本地 `Qwen/Qwen3-Embedding-0.6B`（MPS）、智谱 `embedding-3` 或阿里云百炼
+  Embedding，以及可选 BGE Reranker。
+- 受控实体版 `light_entity`：高精度实体类型、去噪规则、规范命名和关系约束。
 - DeepSeek OpenAI 兼容 API 的实体关系抽取与答案生成。
 - Qdrant 向量存储、NetworkX 图存储和本地 JSON 状态存储。
 - 文档、页码、章节和原文片段引用映射。
 - 图谱可视化及同一问题的多模式横向比较。
 - FastAPI、Streamlit、批量导入、全量重建、诊断和 Smoke Test。
-- 事件抽取、跨文档合并、证据绑定、时间线、立场冲突检测和事件增强问答。
+- 统一 Query Planner，以及文本向量、语义图谱、事件向量三路可回溯证据融合。
+- 事件抽取、跨文档合并、来源段绑定、时间线、立场冲突检测和事件增强问答。
 
-LightRAG 本身负责“语义图谱 + 向量”。事件层不是第二套 RAG，而是索引和查询两阶段
-的时间、状态与证据约束。
+统一检索器显式调用 LightRAG `naive` 文本向量和 `hybrid` 语义图谱两路，再与独立事件
+向量通路做文档级 RRF；评测和在线回答使用同一批最终证据。
 
 ## 运行组件
 
@@ -36,7 +43,7 @@ LightRAG 本身负责“语义图谱 + 向量”。事件层不是第二套 RAG�
 | FastAPI | macOS 本地进程 | `127.0.0.1:8000` |
 | Streamlit | macOS 本地进程 | `127.0.0.1:8501` |
 | Qdrant | Docker/Colima | `127.0.0.1:6333` |
-| Embedding | macOS 本地进程 | Qwen3 Embedding 0.6B |
+| Embedding | macOS 本地进程、智谱或百炼 API | 默认 Qwen3 Embedding 0.6B |
 | Reranker | macOS 本地进程，可关闭 | BGE Reranker v2 M3 |
 | 图存储 | 本地文件 | NetworkX GraphML |
 | LLM | DeepSeek API | `deepseek-v4-flash` |
@@ -159,6 +166,16 @@ uv run python scripts/reset_demo.py --yes
 ```bash
 UV_CACHE_DIR=.uv-cache uv run ruff check .
 UV_CACHE_DIR=.uv-cache uv run pytest
+```
+
+运行不调用DeepSeek的检索评测Smoke Test：
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run --extra evaluation \
+  python scripts/evaluate_retrieval.py \
+  --dataset smoke \
+  --dataset-dir demo_data/evaluation_smoke \
+  --methods naive,hybrid
 ```
 
 停止 Qdrant：

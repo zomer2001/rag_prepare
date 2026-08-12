@@ -2,8 +2,8 @@
 
 > 文档类型：As-built 技术报告  
 > 项目名称：`rag-graph-demo`  
-> 报告版本：v2.0
-> 更新日期：2026-08-03
+> 报告版本：v2.2
+> 更新日期：2026-08-06
 > 目标环境：Apple Silicon M4、16GB 内存、macOS  
 > 当前核心版本：LightRAG 1.5.3、Qdrant 1.18.2、Docling 2.117.0
 
@@ -20,7 +20,7 @@
 5. 事件抽取、归一合并、证据绑定、时间链和冲突表达。
 6. 向量、语义和事件三条通路在索引与查询阶段的协同。
 7. Qdrant、NetworkX、事件库、本地 JSON 与文件系统的存储职责。
-8. 本地 Embedding、可选 Reranker 与 DeepSeek LLM 的职责划分。
+8. 本地、智谱或阿里云百炼 Embedding、可选 Reranker 与 DeepSeek LLM 的职责划分。
 9. 诊断、运行恢复、安全边界、验证结果和生产化路线。
 
 本报告不把 LightRAG 内部已经提供的能力包装成项目自研算法。项目的核心价值是将
@@ -36,7 +36,8 @@ LightRAG、Qdrant、Docling、DeepSeek 和本地模型组织成一个可运行�
 系统采用“采集层 + LightRAG 语义核心 + 事件断言层”的设计：
 
 - Collection 管线从官网、合同、论文、专利、新闻和智库来源采集并规范化资料。
-- LightRAG 统一完成文本切块、向量索引、实体关系抽取、图谱索引和查询编排。
+- 应用默认在 LightRAG 上加载受控实体抽取模板，完成文本切块、向量索引、实体关系抽取、
+  图谱索引和查询编排；官方默认抽取只作为实验基线保留。
 - Qdrant 保存文本块、实体和关系三类向量。
 - NetworkX 保存实体关系图的拓扑结构和属性。
 - EventService 把静态描述转换为带时间、主体、动作、对象、结果和证据的事件。
@@ -46,13 +47,14 @@ LightRAG、Qdrant、Docling、DeepSeek 和本地模型组织成一个可运行�
 - LightRAG JSON KV 保存原文、Chunk、实体、关系、文档状态和 LLM 缓存。
 - 项目自己的 JSON Registry 保存用户可见的文档状态与后台任务状态。
 - Docling 将 PDF、DOCX 规范化为 Markdown。
-- Qwen3 Embedding 0.6B 在 Mac 本地运行。
+- Embedding 默认由 Qwen3 Embedding 0.6B 在 Mac 本地 MPS 运行，也可切换到阿里云百炼
+  `text-embedding-v4` 的 OpenAI 兼容接口。
 - DeepSeek API 承担实体关系抽取、查询关键词抽取、描述合并和最终答案生成。
 - FastAPI 提供业务 API，Streamlit 提供演示界面。
 
 ### 2.2 当前真实数据状态
 
-以下是 2026-08-03 在当前分支完成真实 DeepSeek 抽取后的本地验证快照。运行数据被
+以下是 2026-08-03 在当时分支完成真实 DeepSeek 抽取后的历史验证快照。运行数据被
 `.gitignore` 排除，不是仓库内置固定数据：
 
 | 指标 | 当前值 |
@@ -70,6 +72,9 @@ LightRAG、Qdrant、Docling、DeepSeek 和本地模型组织成一个可运行�
 36 篇文档没有抽出事件，主要是产品导航、简介或缺少明确动作和时间的短页面。这种
 `event_count=0` 仍是成功结果，不应被误判为索引失败。
 
+该快照不代表 `event_v4_key_events` 关键事件模板的实验结果。2026-08-06 已按评测要求清理旧索引，后续
+`light_entity` 与 `ours` 的数字必须由固定数据集重新建库后生成。
+
 ### 2.3 当前部署边界
 
 本地运行时有三个主要服务：
@@ -78,8 +83,8 @@ LightRAG、Qdrant、Docling、DeepSeek 和本地模型组织成一个可运行�
 2. FastAPI 进程：`127.0.0.1:8000`。
 3. Streamlit 进程：`127.0.0.1:8501`。
 
-Embedding、Reranker、Docling、LightRAG 和事件规则均在 FastAPI 或批处理脚本进程内
-运行。DeepSeek 是唯一外部模型服务。Collection 与知识索引故意分成两个阶段：采集
+本地模式下，Embedding、Reranker、Docling、LightRAG 和事件规则均在 FastAPI 或批处理
+脚本进程内运行；切到智谱或百炼模式后 Embedding 也是外部模型服务。Collection 与知识索引故意分成两个阶段：采集
 阶段绝不写 Qdrant；只有 `import_directory.py` 才把 Clean 数据导入知识库。
 
 ---
@@ -99,7 +104,7 @@ flowchart LR
     QUERY["QueryService"]
     EVENT["EventService<br/>抽取 / 归并 / 时间过滤 / 证据"]
     ENGINE["LightRAGEngine"]
-    EMBED["Qwen3 Embedding 0.6B<br/>本地 MPS"]
+    EMBED["Embedding Provider<br/>本地 Qwen MPS / 阿里云百炼"]
     RERANK["BGE Reranker v2 M3<br/>可选、本地"]
     LLM["DeepSeek API"]
     QDRANT[("Qdrant<br/>Chunk / Entity / Relation Vectors")]
@@ -225,20 +230,34 @@ sequenceDiagram
 | 应用 | `APP_PORT` | FastAPI 监听端口 |
 | Qdrant | `QDRANT_URL` | 向量数据库地址 |
 | DeepSeek | `DEEPSEEK_CHAT_MODEL` | 回答模型 |
+| Embedding | `EMBEDDING_PROVIDER` | `local`、智谱 `zhipu` 或百炼 `bailian` |
 | Embedding | `EMBEDDING_MODEL` | 本地模型路径或 Hugging Face ID |
+| 百炼 | `BAILIAN_BASE_URL` | OpenAI 兼容地域/业务空间地址 |
+| 百炼 | `BAILIAN_EMBEDDING_MODEL` | 默认 `text-embedding-v4` |
 | Reranker | `RERANKER_ENABLED` | 是否启用 CrossEncoder |
 | Parser | `PARSER_OCR_ENABLED` | 是否启用 PDF OCR |
 | LightRAG | `LIGHTRAG_QUERY_MODE` | 默认查询模式 |
-| 并发 | `LLM_MAX_CONCURRENCY` | DeepSeek 最大并发 |
+| 实体 | `LIGHT_ENTITY_PROMPT_FILE` | 受控实体/关系抽取 YAML |
+| 实体 | `LIGHT_ENTITY_MAX_ENTITIES` | 单次响应实体上限，默认 4 |
+| 实体 | `LIGHT_ENTITY_MAX_RELATIONSHIPS` | 单次响应关系硬上限，默认 4 |
+| 实体 | `LIGHT_ENTITY_MAX_RECORDS` | 实体与关系总记录上限，默认 8 |
+| 并发 | `LLM_MAX_CONCURRENCY` | DeepSeek 最大并发，默认 4 |
+| 并发 | `EMBEDDING_MAX_CONCURRENCY` | Embedding API 最大并发批次，默认 2；本地模型固定为 1 |
+| 并发 | `GRAPH_INDEX_CONCURRENCY` | LightRAG 内部并行文档数，默认 2 |
 | 事件 | `EVENT_EXTRACTION_ENABLED` | 是否在文档索引后抽取事件 |
 | 事件 | `EVENT_EXTRACTION_CHUNK_CHARS` | 单次事件抽取字符数 |
-| 事件 | `EVENT_EXTRACTION_MAX_EVENTS` | 单文档最多事件数 |
+| 事件 | `EVENT_EXTRACTION_MAX_EVENTS` | 单文档最多事件数，默认 12 |
+| 事件 | `EVENT_EXTRACTION_MAX_EVENTS_PER_PART` | 单片段最多关键事件数，默认 5 |
+| 事件 | `EVENT_INDEX_CONCURRENCY` | 评测事件索引 Worker 数，默认 3 |
 
 `EMBEDDING_MODEL` 与 `EMBEDDING_MODEL_ID` 被有意拆分：
 
 - `EMBEDDING_MODEL` 可以是本地磁盘路径。
 - `EMBEDDING_MODEL_ID` 是稳定的逻辑模型名。
 - Qdrant 集合名称基于稳定 ID 和维度生成，不会因模型下载目录变化而变化。
+
+API 模式的有效索引身份由“提供方 + 模型 + 维度”组成。切换提供方、模型或维度后，
+必须创建新索引，不能因为向量维度恰好相同就复用本地 Qwen 的向量集合。
 
 ### 4.2 领域模型
 
@@ -579,6 +598,10 @@ CHUNK_OVERLAP_TOKENS=100
 ```dotenv
 ENTITY_EXTRACTION_USE_JSON=true
 LIGHTRAG_SUMMARY_LANGUAGE=Chinese
+LIGHT_ENTITY_MAX_GLEANING=0
+LIGHT_ENTITY_MAX_ENTITIES=4
+LIGHT_ENTITY_MAX_RELATIONSHIPS=4
+LIGHT_ENTITY_MAX_RECORDS=8
 ```
 
 LightRAG 对每个 Chunk 调用 `extract` 角色 LLM，要求返回严格 JSON：
@@ -603,30 +626,72 @@ LightRAG 对每个 Chunk 调用 `extract` 角色 LLM，要求返回严格 JSON�
 }
 ```
 
-默认实体类型包括：
+应用使用 `prompts/entity_type/light_entity.yaml` 中的受控实体类型：
 
 - Person
-- Creature
 - Organization
 - Location
-- Event
-- Concept
+- ResearchObject
 - Method
-- Content
-- Data
-- Artifact
-- NaturalObject
-- Other
+- Model
+- Dataset
+- Material
+- Device
+- Concept
 
 抽取规则强调：
 
-- 只从输入文本抽取。
-- 实体命名保持一致。
-- N 元关系拆成二元关系。
-- 关系默认按无向关系处理，除非文本明确方向。
-- 实体和关系描述使用指定语言。
-- 专名在翻译可能造成歧义时保留原语言。
-- 优先保留高价值关系，限制单次输出数量。
+- 这不是穷举式命名实体识别；只保留缺少后无法表达当前 Chunk 核心事实或必要多跳链的
+  绝对关键实体，专名、领域相关或被重复提及本身都不足以入图。
+- 只有能作为稳定检索锚点，且参与明确断言/关系/事件、被定义或在文中居于核心的对象
+  才建立实体。
+- 删除候选后若不会明显损害事实检索，则省略该候选。
+- 发布、实验、观测、决策、纠正等发生性信息不作为语义实体，交给独立事件通路表达。
+- 标题、导航、宽泛主题、列表类别、代词、孤立修饰语不建节点。
+- 日期、年份、版本号、单位、数值和指标值默认作为描述或关系属性，不独立建节点；只有
+  明确代表不同模型、数据集、标准或产品版本时例外。
+- 不再把不确定候选强制塞入 `Other`；不满足标准时直接省略。
+- 同一对象使用一个规范名；明确给出全称与缩写时采用“全称（缩写）”并在当前抽取中复用。
+- 关系必须由文本直接陈述或强支持，单纯共现不建边，也不补泛化的 `related_to`。
+- 动作关系保留方向，并优先使用分类、组成、使用、生产、测量、证据支持、矛盾、纠正、
+  替代、因果、时间和位置等可比较的关系关键词。
+- 实体和关系描述可保留理解事实所需的全部原文支持细节，不设置描述长度上限。
+- 数量是上限而非目标；候选不足时不要求填满 4 个实体或 8 条总记录，也允许返回空数组。
+- `light_entity/ours` 在 LLM 返回后、LightRAG 解析前执行实体 4、关系 4 的硬截断，并删除
+  端点未进入最终关键实体集合的关系；官方 `light` 不使用该后处理。
+
+### 6.2.1 LightRAG 改动边界与实验消融
+
+项目没有修改 LightRAG 1.5.3 的内部解析协议，而是使用其公开的
+`addon_params.entity_type_prompt_file` 扩展点加载 YAML，并设置原生的
+`entity_extract_max_gleaning`、`entity_extract_max_entities` 和
+`entity_extract_max_records`。这使升级边界清晰，也便于与官方默认行为公平对照。
+
+当前实验方法定义为：
+
+| 方法 | 实体/关系图 | 事件通路 | 目的 |
+|---|---|---|---|
+| `light` | 官方 LightRAG 默认抽取 | 无 | 原始 LightRAG 基线 |
+| `light_entity` | 受控实体模板；显式向量＋语义两路RRF | 无 | 测量受控语义检索能力 |
+| `ours` | 与 `light_entity` 完全相同且共用索引 | 事件向量第三路 | 测量事件表达的增量贡献 |
+
+评测 Runner 对Embedding、LightRAG实体图、事件文档和各方法查询分别维护终端进度条，显示
+完成比例、处理速度、已用时间和预计剩余时间；`--no-progress`可关闭动态输出。
+
+`light` 与 `light_entity` 使用独立 LightRAG 工作区和 Qdrant workspace 分区，避免两个
+抽取策略污染同一图谱；
+`ours` 则直接复用 `light_entity` 图索引，只增加事件索引与查询融合。实体 Prompt 内容、
+数量上限和事件模板版本都会进入评测 Runner 的索引指纹，配置变化后不会误命中旧完成
+标记。常规应用索引修改抽取模板后仍需执行 `reset_demo.py --yes` 或换新 workspace 重建。
+
+统一 Query Planner 每个问题只调用一次LLM，同时提供 LightRAG 高低层关键词与事件实体、
+时间、类型、状态和扩展意图。`light_entity` 分别调用 `naive` 与 `hybrid` 得到文本向量和
+语义图谱证据；`ours` 在完全相同的两路上增加持久化事件向量、结构重排与可选一跳事件链。
+三路按文档RRF，同一事件的多个来源共享事件rank；每个最终文档仍分别保留各路最强证据。
+
+本版本的“实体对齐”限于抽取阶段的规范命名与 LightRAG 原有的同名合并。尚未实现带别名
+表、外部知识库 ID、跨文档候选打分和人工阈值的独立实体链接器，因此技术报告不把它宣称
+为完整的全局实体对齐算法。这是后续 `light_entity` 可继续增强和单独评测的边界。
 
 ### 6.3 实体合并
 
@@ -703,6 +768,28 @@ LightRAG 成功后，由 `LLMEventExtractor` 按最多 12,000 字符的片段调
 5. 同一事件同时存在 `affirmed` 与 `denied` 时标记 `disputed` 并生成冲突记录。
 6. 对每个实体只连接时间排序后的相邻事件，避免公共实体形成完全图。
 
+`event_v4_key_events` 模板不做穷举式动作抽取。候选必须有明确核心动作、至少一个命名
+参与者，以及受作用对象、明确结果或状态变化中的至少一项；删除该候选还应会明显损害
+时间、变化、当前状态或冲突类问题的回答。模板优先保留关键发布/部署、合同/采购、重要
+合作/投资、产生结果的实验或观测、版本和能力变化、监管/诉讼、人员变化，以及正式否认、
+纠正、撤回和替代；普通提及、背景历史、日常活动和泛泛的“讨论/指出”直接省略。每片段
+最多 5 个关键事件、每文档最多 12 个，数量是上限而非目标。事件摘要和证据不设置字符
+压缩目标，只要求独立可理解且受原文支持。这样 `ours` 增加的是“何时发生/如何变化/证据
+支持何种立场”的结构化表达，而不是把语义图谱实体换一个名字重复抽取。
+
+事件与实体关系不是一次LLM调用共同抽取。实体关系由LightRAG按约700 Token的测试Chunk
+调用受控实体Prompt；完成整个`light_entity`图索引后，事件抽取器再按整篇文档及最多
+12,000字符的事件片段调用独立事件Prompt。两者可以共享同一个DeepSeek模型和并发限流器，
+但Prompt、切片、输出Schema、存储和调用次数彼此独立。
+
+事件抽取结果先写入`event_store.json`，保存规范事件和可回溯`EventMention`。事件还需要
+向量化才能处理与事件摘要措辞不同的语义查询：系统把事件类型、参与者、动作、对象、结果、
+摘要和状态拼成事件规范文本，用当前Embedding生成事件向量。评测实现采用延迟构建——事件
+抽取阶段不立即Embedding，第一次运行`ours`事件查询时按`EMBEDDING_BATCH_SIZE`分批、按
+API并发上限统一生成并缓存到
+`events/event_vectors.npz`；后续指纹一致时直接复用。向量命中的是事件种子，最终返回的
+仍是该事件提及对应的原文证据，而不是用事件摘要自证。
+
 如果模型遗漏 `evidence`，系统不会生成伪证据，而是从当前原文片段中确定性选择最匹配
 句子。其他不合法候选按条跳过；当一个片段所有候选都不合法时，文档事件状态失败并可
 重试。
@@ -712,12 +799,53 @@ LightRAG 成功后，由 `LLMEventExtractor` 按最多 12,000 字符的片段调
 ```text
 解析后文档
   ├─ Chunk Embedding → Qdrant：保存“原文说了什么”
-  ├─ 实体/关系抽取 → NetworkX + Qdrant：保存“对象之间有什么关系”
+  ├─ 受控实体/关系抽取 → NetworkX + Qdrant：保存“核心对象之间有什么关系”
   └─ 事件抽取/归并 → Event Store：保存“关系何时、以何状态和何证据成立”
 ```
 
 三条索引共享同一个稳定 `document_id`。因此查询阶段可从事件回到文档证据，也可从
 LightRAG Chunk 映射回原始文件，而不需要复制第三份不可追溯文本。
+
+### 6.8 Embedding 本地/API 切换
+
+`build_embedding_func()` 现在按 `EMBEDDING_PROVIDER` 创建统一的 LightRAG
+`EmbeddingFunc`：
+
+- `local`：继续使用 SentenceTransformers，`auto` 在 Apple Silicon 上优先选择 MPS；
+  Qwen 查询侧保留非对称检索前缀。
+- `bailian`：使用 OpenAI Python SDK 的异步客户端访问阿里云百炼兼容接口；默认模型
+  `text-embedding-v4`、维度 1024，并对返回向量再次执行 L2 归一化。
+- `zhipu`：访问智谱 OpenAI 兼容地址，默认 `embedding-3`、1024 维、单条最大 3,072
+  Token；返回向量同样执行维度校验和 L2 归一化。
+
+接口参数依据[阿里云百炼通用文本向量官方文档](https://help.aliyun.com/zh/model-studio/text-embedding-synchronous-api)：
+`text-embedding-v4` 的 OpenAI 兼容调用支持 `dimensions` 与 `encoding_format=float`，
+单批最多 10 条、单条最多 8,192 Token；当前默认批量 8 未超过该上限。
+
+百炼预留配置：
+
+```dotenv
+EMBEDDING_PROVIDER=bailian
+BAILIAN_API_KEY=...
+BAILIAN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+BAILIAN_EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSION=1024
+BAILIAN_EMBEDDING_DIMENSIONS_ENABLED=true
+```
+
+智谱对应配置：
+
+```dotenv
+EMBEDDING_PROVIDER=zhipu
+ZHIPU_API_KEY=...
+ZHIPU_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+ZHIPU_EMBEDDING_MODEL=embedding-3
+EMBEDDING_DIMENSION=1024
+```
+
+业务空间专属地址或其他地域只需替换 `BAILIAN_BASE_URL`。密钥缺失时在首次实际向量调用
+前明确失败，不会静默回退本地模型。API 模式按批发送文本并沿用现有断点缓存；缓存和
+LightRAG评测指纹同时包含有效提供方、模型与维度，防止本地和云端向量混用。
 
 ---
 
@@ -751,7 +879,7 @@ Qwen/Qwen3-Embedding-0.6B
 
 ### 7.2 非对称检索
 
-模型包装器声明 `supports_asymmetric=True`。
+本地 Qwen 模型包装器声明 `supports_asymmetric=True`。
 
 文档向量直接编码正文；查询向量增加英文任务指令：
 
@@ -763,9 +891,15 @@ Query: {用户问题}
 这是检索模型常用的 Query Instruction 方式。即使问题是中文，任务指令保持英文，查询
 正文仍保持原语言。
 
+百炼的 OpenAI 兼容文本向量接口没有暴露本地包装器使用的 query/document 双侧参数，
+因此 API 适配器声明 `supports_asymmetric=False`，查询和文档走同一编码函数。若后续要
+利用百炼 DashScope 原生接口的 `text_type` 或 `instruct`，应作为单独实验变量实现，
+不能悄悄改变当前对比条件。
+
 ### 7.3 归一化和相似度
 
-Embedding 使用 `normalize_embeddings=True`，Qdrant 集合使用 Cosine 距离。归一化后：
+本地 Embedding 使用 `normalize_embeddings=True`；百炼返回值在客户端再次做 L2
+归一化。Qdrant 集合使用 Cosine 距离。归一化后：
 
 - 向量长度约为 1。
 - Cosine 与点积排序等价。
@@ -821,7 +955,7 @@ Qdrant 是向量数据库，不是原始文档仓库，也不是当前的图数�
 
 ### 8.2 Qdrant 的职责
 
-当前有三个集合：
+本地 Qwen 默认配置有三个集合：
 
 ```text
 lightrag_vdb_chunks_qwen_qwen3_embedding_0_6b_1024d
@@ -834,6 +968,9 @@ lightrag_vdb_relationships_qwen_qwen3_embedding_0_6b_1024d
 1. Chunk 向量：用于 `naive` 和 `mix` 原文召回。
 2. Entity 向量：用于从查询的低层关键词定位实体。
 3. Relationship 向量：用于从高层主题定位关系和宏观上下文。
+
+智谱和百炼模式使用不同的有效模型身份与评测工作区，不能复用上述集合；集合命名分别
+随 `zhipu/embedding-3/1024d` 或 `bailian/text-embedding-v4/1024d` 身份派生。
 
 Qdrant 使用 Cosine 距离和 HNSW 稠密向量索引。它还支持 Payload 过滤和 Payload
 索引，但当前 Demo 还没有基于日期、文档类型、租户或权限做过滤。
@@ -979,7 +1116,10 @@ https://api.deepseek.com
 ```dotenv
 DEEPSEEK_THINKING_ENABLED=false
 LLM_REQUEST_TIMEOUT_SECONDS=120
-LLM_MAX_CONCURRENCY=2
+LLM_MAX_CONCURRENCY=4
+EMBEDDING_MAX_CONCURRENCY=2
+GRAPH_INDEX_CONCURRENCY=2
+EVENT_INDEX_CONCURRENCY=3
 ```
 
 非 Thinking 模式下设置 `temperature=0`，提高抽取 JSON、关键词和引用格式的稳定性。
@@ -1031,8 +1171,9 @@ LightRAG 实体、关系、关键词和回答继续使用安装包
 - QueryParam 的 `response_type`。
 - QueryParam 的 `conversation_history`。
 
-事件抽取 Prompt 则由项目在 `services/event_service.py` 中版本化维护，明确要求只抽取
-原文事件、ISO 部分日期、原文证据、立场和置信度，并使用 JSON Object 响应格式。
+事件抽取 Prompt 则由项目在 `services/event_service.py` 中版本化维护。当前
+`event_v4_key_events` 只选择会改变核心对象状态、能够支持时间/变化/冲突检索的关键事件，
+并要求 ISO 部分日期、原文证据、立场和置信度，使用 JSON Object 响应格式。
 
 优点是保持与 LightRAG 1.5.3 的流程兼容；缺点是领域本体和回答风格尚未项目级版本化。
 
@@ -1043,13 +1184,13 @@ Prompt 结构：
 1. Role：知识图谱专家。
 2. Entity Types：给出允许的类型及定义。
 3. Input Text：把当前 Chunk 放入明确的围栏区域。
-4. Extraction Rules：只抽取明确、重要、直接陈述的实体和关系。
+4. Extraction Rules：只抽取删除后会明显损害事实检索的关键实体和关系；事件交给事件通路。
 5. Naming Rules：保持实体名称一致，专名必要时保留原文。
 6. Relation Rules：N 元关系拆为二元关系，默认无向，避免重复。
 7. JSON Contract：只允许 `entities` 和 `relationships` 两个数组。
-8. Limits：限制实体数和总记录数，优先核心关系。
+8. Limits：最多 4 个绝对关键实体、4 条关键关系和 8 条总记录，均为上限而非目标。
 9. Language：输出中文，专名可保持原语言。
-10. Correction Pass：如果存在漏抽或误抽，允许后续补充或更正。
+10. Description：保留证据支持的必要细节，不对描述强制压缩。
 
 当前 JSON 模式比自定义分隔符文本模式更容易被 Pydantic/JSON Parser 校验，也更适合
 DeepSeek 的结构化输出能力。
@@ -1208,9 +1349,41 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 
 ## 11. 五种检索模式与向量、语义、事件协同
 
+本项目存在两套容易同名混淆的术语：评测脚本的方法名，以及LightRAG自身的查询模式。
+其中`hybrid`含义完全不同，不能把两者的结果或实现混为一谈。
+
+评测脚本`--methods`定义：
+
+| 评测方法 | 实际算法 | 使用BM25 | 使用图谱 |
+|---|---|---:|---:|
+| `naive` | 当前配置Embedding的原文Chunk稠密向量检索 | 否 | 否 |
+| `hybrid` | Dense候选 + `BM25Okapi`候选，以RRF融合 | 是 | 否 |
+| `light` | 官方LightRAG索引与官方`mix`查询 | 否 | 是 |
+| `light_entity` | 受控实体图；显式LightRAG `naive` + LightRAG `hybrid`，文档RRF | 否 | 是 |
+| `ours` | `light_entity`两路 + 事件向量/结构检索，文档RRF | 否 | 是 |
+
+评测`hybrid`使用`rank_bm25.BM25Okapi`。英文按字母数字词项切分，中文使用连续字符二元组；
+Dense与BM25分别取最多`4 × top_k`候选，再用`RRF(k=60)`融合。这是常见的关键词稀疏检索
++语义稠密检索基线，不需要实体抽取或知识图谱。
+
+LightRAG自身查询模式定义：
+
+| LightRAG模式 | 检索内容 | 直接召回原文Chunk向量 | 依赖图谱 |
+|---|---|---:|---:|
+| `naive` | 原问题检索Chunk向量 | 是 | 否 |
+| `local` | 低层关键词→实体向量→实体邻域及来源Chunk | 否 | 是 |
+| `global` | 高层关键词→关系向量→广域关系及来源Chunk | 否 | 是 |
+| `hybrid` | 合并`local`和`global`图谱结果 | 否 | 是 |
+| `mix` | LightRAG `hybrid`图谱结果 + `naive` Chunk向量 | 是 | 是 |
+
+上述所有LightRAG模式都不使用BM25；其“hybrid”是局部实体图与全局关系图的混合，而不是
+工业检索语境下的BM25+Dense。
+
 ### 11.1 `naive`
 
-只从 Qdrant 的 Chunk 集合做向量召回，不使用图谱。
+在LightRAG语境中只从Qdrant Chunk集合做向量召回，不使用图谱。评测脚本的独立`naive`
+采用相同的Dense-only思想，但将固定测试Chunk向量保存在可断点续跑的NumPy文件中，而不是
+调用LightRAG/Qdrant，避免基础基线承担图构建成本。
 
 适合：
 
@@ -1245,7 +1418,8 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 
 ### 11.4 `hybrid`
 
-融合 `local` 和 `global` 的图谱结果，但不等同于加入完整的原始 Chunk 向量基线。
+本节仅指LightRAG内部模式：融合`local`和`global`的图谱结果，不包含BM25，也不包含完整的
+原始Chunk直接向量召回。它会对实体和关系做向量匹配，再沿NetworkX图及来源映射回证据Chunk。
 
 适合：
 
@@ -1259,39 +1433,48 @@ System Prompt。完整覆盖最容易因 LightRAG 升级而失配，应：
 - `global` 关系上下文。
 - `naive` 原始 Chunk 向量召回。
 
-这是当前默认模式，也是最适合演示“图谱 + 向量”的模式。
+这是官方LightRAG基线的默认模式；统一三路系统会显式拆成LightRAG `naive`与LightRAG
+`hybrid`两路，再加入事件向量通路。这里仍与评测方法名`hybrid`（Dense+BM25）无关。
 
 ### 11.6 三条通路如何协同
 
-系统不把事件设计成与 LightRAG 并列的第三套 RAG。职责是：
+三条通路在统一编排器中平级召回证据，但各自承担不同职责：
 
 | 通路 | 查询职责 | 主要存储 |
 |---|---|---|
 | 向量 | 发现语义相似原文，回答“哪些材料可能相关” | Qdrant Chunk |
 | 语义 | 限定实体和关系，回答“涉及谁、是什么关系” | Qdrant Entity/Relation + NetworkX |
-| 事件 | 约束时间、状态、演化和证据，回答“何时、以何状态成立” | Event Registry |
+| 事件 | 约束时间、状态、演化和证据，回答“何时、以何状态成立” | Event Registry + Event Vector Index |
 
 实际查询顺序：
 
-1. QueryService 从问题解析显式年份、年份范围或“近 N 年”。
-2. 若问题中的英文或完整中文名称命中事件参与实体，将其变成硬过滤条件。
-3. EventService 按实体、时间、类型、置信度和词项相关度筛选事件。
-4. 只保留所选事件之间的相邻时间边和冲突，形成事件上下文。
-5. LightRAG 抽取高层和低层关键词。
-6. 在实体、关系、Chunk 三类向量中检索并从 NetworkX 扩展图邻域。
-7. LightRAG 去重、排序、预算裁剪并生成答案。
-8. QueryService 合并 LightRAG 文档引用与 `[E#]` 事件证据引用。
+1. Query Planner一次产生高低层关键词、实体、时间、事件类型、状态意图和事件链扩展开关。
+2. LightRAG `naive`使用原问题召回文本Chunk，保留`chunk_id`与`file_path`。
+3. LightRAG `hybrid`直接复用Planner关键词，召回实体/关系并回溯来源Chunk，不再二次调用Query LLM。
+4. 事件向量先召回种子事件；EventService再做实体、时间、类型、状态和多来源重排。
+5. 对先后、变化、纠正等问题，种子事件最多沿现有事件边扩展一跳。
+6. 三路候选统一为EvidenceCandidate，先在各路按文档去重，再以RRF融合文档排名。
+7. 每个入选文档保留最多三段证据，优先保证向量、图谱和事件每路各有一段可追溯原文。
+8. QueryService将同一Top-K证据包交给DeepSeek生成答案，并直接建立统一数字引用。
 
-事件存储不可用时，第 1～4 步自动降级，系统仍执行基础 LightRAG 查询。
+Planner输出的多个实体和事件类型是排序提示而非AND硬过滤：一个事件匹配其中任一关键实体
+即可获得加分，只有API显式传入的单个`entity`仍作为硬过滤。Planner时间范围只接受问题
+原文明确出现的年份，时间未知的候选不会因提示时间而直接丢弃。为避免同一规范事件的多个
+转载来源淹没Top-K，每个事件最多贡献两个不同来源文档，随后按事件与来源顺序形成唯一的
+事件证据排名。
 
-LightRAG 内部没有被项目替换为自定义加权公式。其向量与语义融合仍由 1.5.3 完成：
+评测Runner与在线QueryService共享`UnifiedRetrievalOrchestrator`，不再出现评测使用RRF而
+在线回答只注入事件`user_prompt`的双轨行为：
 
 ```text
-事件约束上下文
-       ↓ user_prompt
-向量 Chunk + 语义实体/关系/子图
-       ↓ Context packing
-DeepSeek 回答 + LightRAG 引用 + [E#] 事件引用
+Query Planner
+  ├→ naive Chunk证据
+  ├→ hybrid图谱来源证据
+  └→ Event Vector + 结构过滤/一跳扩展
+                  ↓ 文档RRF
+             最终Top-K证据包
+                  ↓
+          DeepSeek回答 + 统一[数字]引用
 ```
 
 项目控制的主要融合参数：
@@ -1299,20 +1482,21 @@ DeepSeek 回答 + LightRAG 引用 + [E#] 事件引用
 | 参数 | 当前值 | 影响 |
 |---|---:|---|
 | `top_k` | 20 | 实体和关系候选数 |
-| `chunk_top_k` | 10 | 文本 Chunk 候选数 |
+| `chunk_top_k` | 10 | 最终证据文档数 |
 | `max_total_tokens` | 24000 | 总上下文预算 |
 | `cosine_threshold` | 0.2 | 向量最低相似度 |
 | `enable_rerank` | false | 是否重排文本候选 |
 
 ### 11.7 当前融合边界
 
-- 没有 BM25 或稀疏向量，专有名词拼写和精确字符串可能只靠 Dense Embedding。
+- 独立评测`hybrid`基线已有BM25；但`light`、`light_entity`、`ours`及在线统一检索尚未把
+  BM25/稀疏向量作为正式通路，专有名词和精确字符串在这些方法中仍主要依赖Dense与图谱。
 - 事件已有时间和实体过滤，但 LightRAG Chunk 召回尚未使用统一元数据过滤。
 - 多源状态目前按不同文档近似，尚未按出版机构独立性和来源等级加权。
 - 没有显式的多样性优化或 MMR。
-- 没有 Query Router 自动选择模式。
+- Query Planner已经统一关键词和事件意图，但尚未根据问题动态关闭无关通路。
 - 没有基于问题类型动态分配实体、关系和 Chunk Token 预算。
-- 事件召回是结构化过滤加轻量词项相关度，没有独立事件向量。
+- 事件向量目前是实验规模的本地持久化矩阵，尚未迁移Qdrant独立集合。
 - 事件时间边表示相邻顺序或相关性，绝不自动解释为因果。
 
 这些是下一阶段最有价值的检索创新点。
@@ -1485,8 +1669,8 @@ DeepSeek 回答 + LightRAG 引用 + [E#] 事件引用
 9. 事件已有时间属性和相邻演化链，但没有可靠的自动因果识别。
 10. 事件类型和中英文实体归并仍以规则为主，可能欠合并或误合并。
 11. 多源状态按文档数计算，尚未判断同一媒体转载或来源引用关系。
-12. 事件没有独立向量索引，适合当前 Demo 规模。
-13. 没有稀疏检索、BM25 和统一元数据过滤。
+12. 事件向量索引当前以单机 `.npz` 文件持久化，适合实验规模，不适合多进程并发写入。
+13. 只有独立评测`hybrid`基线使用BM25；LightRAG与`ours`尚未集成稀疏通路和统一元数据过滤。
 14. Reranker 尚未在本机真实语料上做收益评估。
 15. LightRAG 引用与事件引用已可追溯，但尚未对最终答案执行逐 Claim 二次校验。
 16. 没有 Agent 工具执行层。

@@ -106,6 +106,11 @@ class EventRegistry:
                     document_title=document_title,
                     trigger=candidate.trigger,
                     evidence=candidate.evidence,
+                    source_segment_id=candidate.source_segment_id,
+                    source_segment_start=candidate.source_segment_start,
+                    source_segment_end=candidate.source_segment_end,
+                    evidence_start=candidate.evidence_start,
+                    evidence_end=candidate.evidence_end,
                     stance=candidate.stance,
                     confidence=candidate.confidence,
                 )

@@ -92,8 +92,29 @@ async def build_diagnostics(*, check_qdrant: bool) -> dict[str, Any]:
     directories = [_check_directory(path) for path in settings.required_data_dirs]
     qdrant = await asyncio.to_thread(_check_qdrant) if check_qdrant else {"ok": None}
     deepseek = await asyncio.to_thread(_check_deepseek)
+    embedding_key_configured = {
+        "local": True,
+        "bailian": bool(settings.bailian_api_key),
+        "zhipu": bool(settings.zhipu_api_key),
+    }[settings.embedding_provider]
+    effective_embedding_model = {
+        "local": settings.embedding_model_id,
+        "bailian": settings.bailian_embedding_model,
+        "zhipu": settings.zhipu_embedding_model,
+    }[settings.embedding_provider]
+    embedding = {
+        "ok": embedding_key_configured,
+        "provider": settings.embedding_provider,
+        "model": settings.embedding_model,
+        "model_id": settings.embedding_model_id,
+        "effective_model": effective_embedding_model,
+        "dimension": settings.embedding_dimension,
+        "device": settings.embedding_device,
+    }
+    if not embedding["ok"]:
+        embedding["error"] = f"{settings.embedding_provider.upper()}_API_KEY is not configured"
     infrastructure_ready = all(item["ok"] for item in directories) and bool(qdrant["ok"])
-    ready = infrastructure_ready and bool(deepseek["ok"])
+    ready = infrastructure_ready and bool(deepseek["ok"]) and bool(embedding["ok"])
 
     return {
         "summary": {
@@ -109,12 +130,7 @@ async def build_diagnostics(*, check_qdrant: bool) -> dict[str, Any]:
         "directories": directories,
         "qdrant": qdrant,
         "deepseek": deepseek,
-        "embedding": {
-            "model": settings.embedding_model,
-            "model_id": settings.embedding_model_id,
-            "dimension": settings.embedding_dimension,
-            "device": settings.embedding_device,
-        },
+        "embedding": embedding,
         "lightrag": {
             "workspace": settings.lightrag_workspace,
             "working_dir": str(settings.lightrag_working_dir),

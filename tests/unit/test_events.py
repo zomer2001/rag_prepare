@@ -91,11 +91,128 @@ async def test_event_query_filters_time_and_builds_timeline_relations(tmp_path) 
         )
     )
 
-    assert [item.start_time for item in result.events] == ["2024-01", "2025-05"]
+    assert [item.start_time for item in result.events] == ["2025-05", "2024-01"]
     assert result.inferred_start_time == "2024"
     assert result.inferred_end_time == "2025-12-31"
     assert len(result.relations) == 1
     assert result.relations[0].relation_type == "precedes"
+    context, _ = await service.build_query_context(
+        "2024 到 2025 年 Lattice 有哪些变化？"
+    )
+    assert "事件链（只表达时间或共享实体，不自动表示因果）" in context
+    assert "--先于(" in context
+    assert "Lattice)-->" in context
+
+
+@pytest.mark.asyncio
+async def test_planner_entities_and_event_types_are_soft_ranking_hints(tmp_path) -> None:
+    registry = EventRegistry(tmp_path / "events.json")
+    service = EventService(registry)
+    await registry.replace_document_events(
+        "doc-1",
+        "发布",
+        [candidate(summary="Anduril 发布 Lattice。", start_time="2025")],
+    )
+
+    result = await service.search(
+        EventQueryRequest(
+            question="What happened to Lattice?",
+            entities=["Anduril Industries", "TechCrunch", "The Verge"],
+            event_types=["contract"],
+        )
+    )
+    hard_filtered = await service.search(
+        EventQueryRequest(
+            question="What happened to Lattice?",
+            entity="Meta",
+        )
+    )
+
+    assert len(result.events) == 1
+    assert hard_filtered.events == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_event_time_survives_planner_time_hint(tmp_path) -> None:
+    registry = EventRegistry(tmp_path / "events.json")
+    service = EventService(registry)
+    unknown_time = candidate(
+        summary="Anduril 发布 Lattice。",
+        start_time="2025",
+    ).model_copy(update={"start_time": None})
+    await registry.replace_document_events("doc-1", "发布", [unknown_time])
+
+    result = await service.search(
+        EventQueryRequest(
+            question="What happened to Lattice in 2025?",
+            start_time="2025",
+            end_time="2025-12-31",
+        )
+    )
+
+    assert len(result.events) == 1
+    assert result.rankings[0].temporal_score == 0
+
+
+@pytest.mark.asyncio
+async def test_event_search_keeps_relevance_rank_and_timeline_can_sort_by_time(
+    tmp_path,
+) -> None:
+    registry = EventRegistry(tmp_path / "events.json")
+    service = EventService(registry)
+    await registry.replace_document_events(
+        "doc-old",
+        "早期发布",
+        [candidate(summary="Anduril 发布 Lattice。", start_time="2024")],
+    )
+    await registry.replace_document_events(
+        "doc-new",
+        "雷达升级测试",
+        [
+            candidate(
+                summary="Anduril 完成 Lattice 雷达升级测试并公布结果。",
+                start_time="2025",
+            )
+        ],
+    )
+    question = "Lattice 雷达升级测试结果"
+
+    ranked = await service.search(EventQueryRequest(question=question))
+    timeline = await service.search(
+        EventQueryRequest(question=question, sort_by="time")
+    )
+    context, _ = await service.build_query_context(question)
+
+    assert [item.start_time for item in ranked.events] == ["2025", "2024"]
+    assert [item.event_id for item in ranked.rankings] == [
+        item.event_id for item in ranked.events
+    ]
+    assert ranked.rankings[0].score > ranked.rankings[1].score
+    assert ranked.rankings[0].action_score >= ranked.rankings[1].action_score
+    assert [item.start_time for item in timeline.events] == ["2024", "2025"]
+    assert [item.rank for item in timeline.rankings] == [1, 2]
+    assert context.index("Anduril 发布 Lattice。") < context.index(
+        "Anduril 完成 Lattice 雷达升级测试并公布结果。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_latest_event_intent_exposes_recency_as_a_ranking_signal(tmp_path) -> None:
+    registry = EventRegistry(tmp_path / "events.json")
+    service = EventService(registry)
+    for year in ("2024", "2025"):
+        await registry.replace_document_events(
+            f"doc-{year}",
+            f"Lattice {year}",
+            [candidate(summary="Anduril 更新 Lattice 状态。", start_time=year)],
+        )
+
+    result = await service.search(
+        EventQueryRequest(question="目前 Lattice 最新状态是什么？")
+    )
+
+    assert [item.start_time for item in result.events] == ["2025", "2024"]
+    assert [item.temporal_score for item in result.rankings] == [1.0, 0.0]
 
 
 @pytest.mark.asyncio
@@ -111,6 +228,38 @@ async def test_event_timeline_uses_adjacent_edges_not_complete_graph(tmp_path) -
     _, _, relations, _ = await registry.snapshot()
 
     assert len(relations) == 2
+
+
+@pytest.mark.asyncio
+async def test_event_vector_seed_can_expand_one_timeline_hop(tmp_path) -> None:
+    registry = EventRegistry(tmp_path / "events.json")
+    service = EventService(registry)
+    await registry.replace_document_events(
+        "doc-old",
+        "旧事件",
+        [candidate(summary="Anduril 发布 Lattice。", start_time="2024")],
+    )
+    await registry.replace_document_events(
+        "doc-new",
+        "新事件",
+        [candidate(summary="Anduril 更新 Lattice。", start_time="2025")],
+    )
+    events = await registry.list_events()
+    seed = next(item for item in events if item.start_time == "2025")
+
+    result = await service.search(
+        EventQueryRequest(
+            question="Lattice 经历了哪些变化？",
+            expand_event_chain=True,
+        ),
+        candidate_event_ids={seed.event_id},
+    )
+
+    assert {item.start_time for item in result.events} == {"2024", "2025"}
+    expanded = {item.event_id for item in result.rankings if item.expanded}
+    assert expanded == {
+        next(item.event_id for item in events if item.start_time == "2024")
+    }
 
 
 @pytest.mark.asyncio
@@ -193,6 +342,10 @@ async def test_llm_event_extractor_accepts_fenced_json() -> None:
     assert len(events) == 1
     assert events[0].event_type == "合同授予"
     assert events[0].objects == ["Anduril"]
+    assert events[0].source_segment_id == "event-part-1"
+    assert events[0].source_segment_start == 0
+    assert events[0].source_segment_end is not None
+    assert events[0].evidence_start is not None
 
 
 class MissingEvidenceEngine:
@@ -214,6 +367,49 @@ async def test_llm_event_extractor_repairs_missing_evidence_from_source() -> Non
     events = await extractor.extract("测试", source)
 
     assert events[0].evidence == "美国政府向 Anduril 授予合同。"
+
+
+class UnsupportedTimePrecisionEngine:
+    async def complete_extraction(self, prompt: str, system_prompt: str) -> str:
+        del prompt, system_prompt
+        return """{"events": [{
+          "event_type": "发布",
+          "summary": "公司本周发布产品。",
+          "actors": ["公司"],
+          "objects": ["产品"],
+          "start_time": "2026-08-03",
+          "time_precision": "week",
+          "evidence": "公司本周发布产品。"
+        }]}"""
+
+
+@pytest.mark.asyncio
+async def test_llm_event_extractor_downgrades_unsupported_time_precision() -> None:
+    extractor = LLMEventExtractor(UnsupportedTimePrecisionEngine())
+
+    events = await extractor.extract("测试", "公司本周发布产品。")
+
+    assert len(events) == 1
+    assert events[0].time_precision.value == "unknown"
+
+
+class ManyEventsEngine:
+    async def complete_extraction(self, prompt: str, system_prompt: str) -> str:
+        del prompt, system_prompt
+        return """{"events": [
+          {"event_type":"发布","summary":"事件一","actors":["A"],"objects":["X"],"evidence":"事件一"},
+          {"event_type":"发布","summary":"事件二","actors":["A"],"objects":["Y"],"evidence":"事件二"},
+          {"event_type":"发布","summary":"事件三","actors":["A"],"objects":["Z"],"evidence":"事件三"}
+        ]}"""
+
+
+@pytest.mark.asyncio
+async def test_event_extractor_enforces_per_part_importance_budget() -> None:
+    extractor = LLMEventExtractor(ManyEventsEngine(), max_events_per_part=2)
+
+    events = await extractor.extract("测试", "事件一。事件二。事件三。")
+
+    assert [item.summary for item in events] == ["事件一", "事件二"]
 
 
 class FakeQueryEngine:

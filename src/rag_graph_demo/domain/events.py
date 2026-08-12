@@ -41,6 +41,11 @@ class EventCandidate(BaseModel):
     evidence: str = Field(min_length=1, max_length=4_000)
     stance: EventStance = "affirmed"
     confidence: float = Field(default=0.65, ge=0, le=1)
+    source_segment_id: str | None = None
+    source_segment_start: int | None = Field(default=None, ge=0)
+    source_segment_end: int | None = Field(default=None, ge=0)
+    evidence_start: int | None = Field(default=None, ge=0)
+    evidence_end: int | None = Field(default=None, ge=0)
 
     @field_validator("actors", "objects", mode="after")
     @classmethod
@@ -60,6 +65,11 @@ class EventMention(BaseModel):
     document_title: str
     trigger: str | None = None
     evidence: str
+    source_segment_id: str | None = None
+    source_segment_start: int | None = Field(default=None, ge=0)
+    source_segment_end: int | None = Field(default=None, ge=0)
+    evidence_start: int | None = Field(default=None, ge=0)
+    evidence_end: int | None = Field(default=None, ge=0)
     stance: EventStance = "affirmed"
     confidence: float = Field(ge=0, le=1)
     recorded_at: datetime = Field(default_factory=utc_now)
@@ -107,16 +117,37 @@ class EventConflict(BaseModel):
 class EventQueryRequest(BaseModel):
     question: str = Field(default="", max_length=10_000)
     entity: str | None = None
+    entities: list[str] = Field(default_factory=list)
     event_types: list[str] = Field(default_factory=list)
     start_time: str | None = None
     end_time: str | None = None
     min_confidence: float = Field(default=0, ge=0, le=1)
     limit: int = Field(default=20, ge=1, le=100)
     include_disputed: bool = True
+    sort_by: Literal["relevance", "time"] = "relevance"
+    state_intents: list[str] = Field(default_factory=list)
+    expand_event_chain: bool = False
+
+
+class EventRanking(BaseModel):
+    """Query-local, explainable ranking signals for one event occurrence."""
+
+    event_id: str
+    rank: int = Field(ge=1)
+    score: float = Field(ge=0)
+    lexical_score: float = Field(ge=0, le=1)
+    entity_score: float = Field(ge=0, le=1)
+    action_score: float = Field(ge=0, le=1)
+    temporal_score: float = Field(ge=0, le=1)
+    state_score: float = Field(ge=0, le=1)
+    confidence_score: float = Field(ge=0, le=1)
+    source_score: float = Field(ge=0, le=1)
+    expanded: bool = False
 
 
 class EventQueryResponse(BaseModel):
     events: list[EventRecord] = Field(default_factory=list)
+    rankings: list[EventRanking] = Field(default_factory=list)
     mentions: list[EventMention] = Field(default_factory=list)
     relations: list[EventRelation] = Field(default_factory=list)
     conflicts: list[EventConflict] = Field(default_factory=list)

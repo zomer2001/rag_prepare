@@ -31,13 +31,27 @@ class Settings(BaseSettings):
     deepseek_thinking_enabled: bool = False
     llm_request_timeout_seconds: int = 120
     llm_max_retries: int = 3
-    llm_max_concurrency: int = 2
+    llm_max_concurrency: int = Field(default=4, ge=1, le=16)
+    agentic_max_retrieval_rounds: int = Field(default=2, ge=1, le=5)
+    agentic_rrf_k: int = Field(default=60, ge=1)
 
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_model_id: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_dimension: int = 1024
     embedding_device: str = "auto"
-    embedding_batch_size: int = 8
+    embedding_batch_size: int = Field(default=8, ge=1, le=128)
+    embedding_max_concurrency: int = Field(default=2, ge=1, le=8)
+    embedding_provider: Literal["local", "bailian", "zhipu"] = "local"
+    bailian_api_key: str | None = None
+    bailian_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    bailian_embedding_model: str = "text-embedding-v4"
+    bailian_embedding_dimensions_enabled: bool = True
+    zhipu_api_key: str | None = None
+    zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    zhipu_embedding_model: str = "embedding-3"
+    zhipu_embedding_dimensions_enabled: bool = True
+    embedding_request_timeout_seconds: int = 60
+    embedding_max_retries: int = 3
 
     reranker_enabled: bool = False
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
@@ -57,10 +71,22 @@ class Settings(BaseSettings):
     lightrag_cosine_threshold: float = 0.2
     lightrag_summary_language: str = "Chinese"
     entity_extraction_use_json: bool = True
-    graph_index_concurrency: int = Field(default=1, ge=1, le=4)
+    light_entity_prompt_file: Path = Path("prompts/entity_type/light_entity.yaml")
+    light_entity_max_gleaning: int = Field(default=0, ge=0, le=3)
+    light_entity_max_entities: int = Field(default=4, ge=1, le=40)
+    light_entity_max_relationships: int = Field(default=4, ge=0, le=60)
+    light_entity_max_records: int = Field(default=8, ge=1, le=100)
+    graph_index_concurrency: int = Field(default=2, ge=1, le=4)
     event_extraction_enabled: bool = True
     event_extraction_chunk_chars: int = Field(default=12_000, ge=2_000, le=50_000)
-    event_extraction_max_events: int = Field(default=40, ge=1, le=200)
+    event_extraction_max_events: int = Field(default=12, ge=1, le=200)
+    event_extraction_max_events_per_part: int = Field(default=5, ge=1, le=30)
+    event_index_concurrency: int = Field(default=3, ge=1, le=8)
+
+    @property
+    def effective_embedding_concurrency(self) -> int:
+        """Keep local MPS/CUDA model access serialized; parallelize remote APIs only."""
+        return 1 if self.embedding_provider == "local" else self.embedding_max_concurrency
 
     @property
     def required_data_dirs(self) -> tuple[Path, ...]:

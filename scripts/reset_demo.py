@@ -8,6 +8,7 @@ from pathlib import Path
 from qdrant_client import QdrantClient
 
 from rag_graph_demo.config import get_settings
+from rag_graph_demo.lightrag_engine.local_models import embedding_model_name
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,7 +46,7 @@ def main() -> None:
     suffix = re.sub(
         r"[^a-zA-Z0-9_]",
         "_",
-        settings.embedding_model_id.strip().lower(),
+        embedding_model_name(settings).strip().lower(),
     )
     suffix = f"{suffix}_{settings.embedding_dimension}d"
     client = QdrantClient(

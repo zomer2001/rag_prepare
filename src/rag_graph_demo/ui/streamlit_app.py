@@ -265,6 +265,7 @@ with events_tab:
                 "start_time": event_start or None,
                 "end_time": event_end or None,
                 "limit": 50,
+                "sort_by": "time",
             },
             timeout=30,
         )
