@@ -26,7 +26,7 @@
   Embedding，以及可选 BGE Reranker。
 - 受控实体版 `light_entity`：高精度实体类型、去噪规则、规范命名和关系约束。
 - DeepSeek OpenAI 兼容 API 的实体关系抽取与答案生成。
-- Qdrant 向量存储、NetworkX 图存储和本地 JSON 状态存储。
+- Qdrant 向量存储、NetworkX 语义抽取图及 Neo4j 声明级 TKG 实例存储。
 - 文档、页码、章节和原文片段引用映射。
 - 图谱可视化及同一问题的多模式横向比较。
 - FastAPI、Streamlit、批量导入、全量重建、诊断和 Smoke Test。
@@ -47,11 +47,11 @@
 | Qdrant | Docker/Colima | `127.0.0.1:6333` |
 | Embedding | macOS 本地进程、智谱或百炼 API | 默认 Qwen3 Embedding 0.6B |
 | Reranker | macOS 本地进程，可关闭 | BGE Reranker v2 M3 |
-| 图存储 | 本地文件 | NetworkX GraphML + 声明级 TKG JSON；Neo4j 可选投影 |
+| 图存储 | Docker + 本地文件 | Neo4j 声明级 TKG + NetworkX LightRAG抽取图 |
 | LLM | DeepSeek API | `deepseek-v4-flash` |
 
-默认仍只需要一个数据库容器：Qdrant。声明级 TKG 先使用本地原子 JSON 验证模型；
-Neo4j 是可选的查询投影，不是索引前置条件。
+默认需要 Qdrant 和 Neo4j 两个数据库容器。JSON保留为融合事务镜像和可回滚快照；
+`/tkg/query`、图谱浏览和三通路中的声明读取使用 Neo4j。
 
 ## 首次启动
 
@@ -78,7 +78,7 @@ DEEPSEEK_API_KEY=你的密钥
 
 ```bash
 uv sync
-docker-compose up -d qdrant
+docker-compose up -d qdrant neo4j
 uv run python scripts/doctor.py
 uv run uvicorn rag_graph_demo.api.app:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -96,6 +96,7 @@ uv run streamlit run src/rag_graph_demo/ui/streamlit_app.py \
 - Demo UI：<http://127.0.0.1:8501>
 - API 文档：<http://127.0.0.1:8000/docs>
 - Qdrant Dashboard：<http://127.0.0.1:6333/dashboard>
+- Neo4j Browser：<http://127.0.0.1:7474>（默认用户 `neo4j`，密码见 `.env`）
 
 首次真正索引时会从 Hugging Face 下载 Qwen3 Embedding 模型，时间取决于网络。
 模型只在第一次索引或查询时懒加载。M4 16GB 默认关闭 Reranker，先完成稳定演示后再
@@ -207,6 +208,10 @@ docker-compose down
 | `POST` | `/api/v1/documents/{id}/events/rebuild` | 单独重建文档事件 |
 | `GET` | `/api/v1/tkg` | 查看声明级 TKG 快照与融合轨迹 |
 | `POST` | `/api/v1/tkg/query` | 按实体、关系和有效时间查询声明 |
+| `GET` | `/api/v1/tkg/graph` | 从 Neo4j读取实体—声明—实体可视化数据 |
+| `GET` | `/api/v1/tkg/governance/reviews` | 查看待治理实体案例 |
+| `POST` | `/api/v1/tkg/governance/reviews/{id}/resolve` | 接受、拒绝或暂缓候选合并 |
+| `POST` | `/api/v1/tkg/governance/merges/{id}/rollback` | 撤销实体合并 |
 
 ## 数据目录
 

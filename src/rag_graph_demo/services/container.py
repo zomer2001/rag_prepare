@@ -9,6 +9,11 @@ from rag_graph_demo.retrieval.event_vector import EventVectorIndex
 from rag_graph_demo.retrieval.orchestrator import UnifiedRetrievalOrchestrator
 from rag_graph_demo.retrieval.planner import QueryPlanner
 from rag_graph_demo.services.document_service import DocumentService
+from rag_graph_demo.services.entity_governance_service import EntityGovernanceService
+from rag_graph_demo.services.entity_resolution_service import (
+    EntityResolutionService,
+    OntologyTypeMapper,
+)
 from rag_graph_demo.services.event_service import EventService, LLMEventExtractor
 from rag_graph_demo.services.ontology_service import OntologyService
 from rag_graph_demo.services.query_service import QueryService
@@ -17,6 +22,7 @@ from rag_graph_demo.storage.document_registry import DocumentRegistry
 from rag_graph_demo.storage.event_registry import EventRegistry
 from rag_graph_demo.storage.file_store import FileStore
 from rag_graph_demo.storage.job_registry import JobRegistry
+from rag_graph_demo.storage.neo4j_tkg_store import Neo4jTKGStore
 from rag_graph_demo.storage.tkg_registry import TKGRegistry
 
 
@@ -54,6 +60,16 @@ class AppContainer:
             else None
         )
         self.event_service = EventService(self.events_registry, event_extractor)
+        self.neo4j_store = (
+            Neo4jTKGStore(
+                settings.neo4j_uri,
+                settings.neo4j_user,
+                settings.neo4j_password,
+                database=settings.neo4j_database,
+            )
+            if settings.neo4j_enabled
+            else None
+        )
         self.tkg_registry = TKGRegistry(
             settings.tkg_registry_path or settings.data_dir / "tkg" / "tkg_store.json",
             ontology_version=settings.tkg_ontology_version,
@@ -66,6 +82,30 @@ class AppContainer:
         self.tkg_service = TKGFusionService(
             self.tkg_registry,
             ontology_version=settings.tkg_ontology_version,
+            entity_resolver=(
+                EntityResolutionService(
+                    OntologyTypeMapper(settings.entity_type_mapping_file),
+                    self.engine.embed_texts,
+                    self.engine.complete_extraction,
+                    candidate_limit=settings.entity_resolution_candidate_limit,
+                    embedding_threshold=(
+                        settings.entity_resolution_embedding_threshold
+                    ),
+                    auto_match_threshold=(
+                        settings.entity_resolution_auto_match_threshold
+                    ),
+                    llm_threshold=settings.entity_resolution_llm_threshold,
+                )
+                if settings.entity_resolution_enabled
+                else None
+            ),
+            neo4j_store=self.neo4j_store,
+            event_registry=self.events_registry,
+        )
+        self.entity_governance_service = EntityGovernanceService(
+            self.tkg_registry,
+            neo4j_store=self.neo4j_store,
+            event_registry=self.events_registry,
         )
         self.query_planner = QueryPlanner(
             self.engine.complete_extraction,
@@ -86,7 +126,11 @@ class AppContainer:
             self.query_planner,
             event_service=self.event_service,
             event_vector_index=self.event_vector_index,
-            tkg_registry=self.tkg_registry if settings.tkg_enabled else None,
+            tkg_registry=(
+                self.neo4j_store or self.tkg_registry
+                if settings.tkg_enabled
+                else None
+            ),
         )
         self.document_service = DocumentService(
             self.file_store,
@@ -106,3 +150,5 @@ class AppContainer:
 
     async def shutdown(self) -> None:
         await self.engine.finalize()
+        if self.neo4j_store is not None:
+            await self.neo4j_store.close()

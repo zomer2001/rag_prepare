@@ -17,7 +17,7 @@
                                                         │
                     OWL/SHACL 静态约束 ─────────────────┤
                                                         ▼
-              本地 TKG 原子存储 → 三通路中的语义图谱召回 → 文档级 RRF
+        JSON事务镜像 → Neo4j实例图 → 三通路中的语义图谱召回 → 文档级 RRF
 ```
 
 LightRAG 建完索引后，系统从它的 NetworkX 存储读取该文档已经抽取的实体和关系，不再次调用
@@ -25,8 +25,12 @@ LLM。事件抽取新增 `fact_effects`，只有原文明示完整事实三元�
 
 ## 融合规则
 
-1. 规范名/别名完全一致且本体类型一致：合并到既有 Entity。
-2. 无确定候选：创建 Entity；存在多个候选：隔离创建并记录 `AMBIGUOUS`，不强合并。
+1. LLM类型先由本体映射表标准化；未注册类型进入治理队列，不直接成为正式类型。
+2. 同类型下按规范名、别名和组织后缀生成确定性候选。
+3. 确定性规则不足时，复用现有 Embedding 对“名称＋类型＋描述”筛选候选。
+4. 高精度、明显领先的候选自动合并；灰区由受约束LLM裁决。
+5. LLM只能输出 MATCH_EXISTING、CREATE_NEW、AMBIGUOUS或REJECT；越权或格式错误降级人工治理。
+6. 不确定案例创建隔离 Entity 和 ReviewCase，文档索引可继续，但不会静默硬合并。
 3. 同一主体、谓词、客体和有效期：复用 Assertion，仅新增来源 Mention。
 4. `DENIES`：增加 denied Mention，肯定与否定并存时 Assertion 为 disputed 并生成 ConflictCase。
 5. `TERMINATES`：关闭 `valid_to`，状态变为 inactive；`SUPERSEDES` 标为 superseded。
@@ -43,20 +47,26 @@ LLM。事件抽取新增 `fact_effects`，只有原文明示完整事实三元�
 
 ## 存储选择
 
-本地 `data/tkg/tkg_store.json` 是当前事务源，适合快速验证模式、规则和标注方案。现阶段
-不双写 Neo4j；当规模和多跳时态查询负载达到阈值后，再把 Entity、Assertion 与
-EventEffect 投影到独立 Neo4j 数据库。投影应是可重建的读模型，而不是新的事实源。
+Neo4j保存完整实例图：Entity、Assertion、Event、Entity/Assertion/Event Mention、
+EventEffect、Conflict、ResolutionDecision、ReviewCase和MergeRecord。Assertion建成节点，
+以便挂接时间、来源、事件作用和冲突。JSON保留为融合事务镜像与恢复材料，不承担在线查询。
+
+实体合并不删除源 Entity，而是标记 `status=merged` 与 `merged_into_id`，并保存该次移动的
+Mention、Assertion端点和Event链接。撤销操作只恢复该次移动的引用；存在后续依赖合并时拒绝撤销。
 
 ## 查询
 
-- `POST /api/v1/tkg/query`：按 Entity ID/名称、predicate、时间点和状态查询。
+- `POST /api/v1/tkg/query`：直接从Neo4j按Entity ID/名称、predicate、时间点和状态查询。
 - 统一检索中，Query Planner 识别到实体后，AssertionMention 作为语义图谱通路的增强候选，
   与原 LightRAG 图谱候选去重；向量、语义图谱、事件仍按三通路做文档级 RRF。
 
 ## 尚未自动化的部分
 
-- Embedding 候选生成和 LLM 歧义裁决接口尚未开启；当前只自动执行高精度确定性合并，
-  其余案例保留 ResolutionDecision。
 - 跨客体的互斥约束依赖更细的领域本体（如一个职位同一时刻只能由一人担任）。
-- Neo4j 投影尚未实施；需先定义启用阈值、独立数据库和增量同步/重建策略。
 - 动态本体演化需要术语候选集、专家审批、迁移脚本和旧版/新版检索评测，不能仅靠 LLM。
+
+## 迁移与重算
+
+`uv run python scripts/migrate_tkg_to_neo4j.py` 只把现有JSON快照迁移到Neo4j，不调用LLM。
+若要让旧文档经过新的本体映射、Embedding和LLM实体解析器，必须重新索引文档；数据搬家与
+融合重算是两个独立操作。

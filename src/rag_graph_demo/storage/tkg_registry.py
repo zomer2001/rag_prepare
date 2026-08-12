@@ -57,6 +57,16 @@ class TKGRegistry:
             self._write(snapshot)
             return result
 
+    async def mutate(self, mutation: Callable[[TKGSnapshot], T]) -> T:
+        async with self._lock:
+            snapshot = self._read()
+            result = mutation(snapshot)
+            self._refresh(snapshot)
+            if self._validate_snapshot is not None:
+                self._validate_snapshot(snapshot)
+            self._write(snapshot)
+            return result
+
     async def delete_document(self, document_id: str) -> None:
         await self.mutate_document(document_id, lambda _: None)
 
@@ -71,8 +81,11 @@ class TKGRegistry:
             entity_ids = {
                 item.entity_id
                 for item in entities
-                if needle == _normal(item.canonical_name)
+                if item.status == "active"
+                and (
+                    needle == _normal(item.canonical_name)
                 or any(needle == _normal(alias) for alias in item.aliases)
+                )
             }
         assertions = []
         for item in snapshot.assertions:
@@ -240,6 +253,17 @@ class TKGRegistry:
         }
         referenced_entities.update(item.entity_id for item in snapshot.entity_mentions)
         referenced_entities.update(item.entity_id for item in snapshot.event_entity_links)
+        referenced_entities.update(
+            item.source_entity.entity_id for item in snapshot.merge_records
+        )
+        referenced_entities.update(
+            entity_id
+            for item in snapshot.review_cases
+            for entity_id in [
+                item.provisional_entity_id,
+                *(candidate.entity_id for candidate in item.candidates),
+            ]
+        )
         snapshot.entities = [
             item for item in snapshot.entities if item.entity_id in referenced_entities
         ]

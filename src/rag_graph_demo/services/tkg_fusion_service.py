@@ -13,6 +13,8 @@ from rag_graph_demo.domain.tkg import (
     ConflictType,
     EntityMention,
     EntityRecord,
+    EntityResolutionProposal,
+    EntityReviewCase,
     EventEffect,
     EventEffectType,
     EventEntityLink,
@@ -25,6 +27,12 @@ from rag_graph_demo.domain.tkg import (
     TKGIndexResult,
     TKGSnapshot,
 )
+from rag_graph_demo.services.entity_resolution_service import (
+    EntityResolutionService,
+    normalize_name,
+)
+from rag_graph_demo.storage.event_registry import EventRegistry
+from rag_graph_demo.storage.neo4j_tkg_store import Neo4jTKGStore
 from rag_graph_demo.storage.tkg_registry import TKGRegistry
 
 ENTITY_TYPE_MAP = {
@@ -85,9 +93,20 @@ def _predicate(value: str) -> str:
 
 
 class TKGFusionService:
-    def __init__(self, registry: TKGRegistry, *, ontology_version: str) -> None:
+    def __init__(
+        self,
+        registry: TKGRegistry,
+        *,
+        ontology_version: str,
+        entity_resolver: EntityResolutionService | None = None,
+        neo4j_store: Neo4jTKGStore | None = None,
+        event_registry: EventRegistry | None = None,
+    ) -> None:
         self._registry = registry
         self._ontology_version = ontology_version
+        self._entity_resolver = entity_resolver
+        self._neo4j_store = neo4j_store
+        self._event_registry = event_registry
 
     async def index_document(
         self,
@@ -96,12 +115,51 @@ class TKGFusionService:
         semantic: SemanticExtractionBatch,
         events: list[EventRecord],
     ) -> TKGIndexResult:
+        proposals: dict[str, EntityResolutionProposal] = {}
+        resolution_candidates = list(semantic.entities)
+        if self._entity_resolver is not None:
+            snapshot = await self._registry.snapshot()
+            resolution_candidates.extend(
+                self._event_resolution_candidates(snapshot, semantic, events)
+            )
+            resolved = await self._entity_resolver.resolve_batch(
+                snapshot, resolution_candidates
+            )
+            proposals = {item.candidate_key: item for item in resolved}
+
         def fuse(snapshot: TKGSnapshot) -> TKGIndexResult:
             before_conflicts = len(snapshot.conflicts)
             names: dict[str, str] = {}
             for candidate in semantic.entities:
                 entity = self._resolve_entity(
-                    snapshot, document_id, document_title, candidate
+                    snapshot,
+                    document_id,
+                    document_title,
+                    candidate,
+                    proposals.get(
+                        "|".join(
+                            (
+                                normalize_name(candidate.name),
+                                normalize_name(candidate.entity_type),
+                            )
+                        )
+                    ),
+                )
+                names[_normal(candidate.name)] = entity.entity_id
+            for candidate in resolution_candidates[len(semantic.entities) :]:
+                entity = self._resolve_entity(
+                    snapshot,
+                    document_id,
+                    document_title,
+                    candidate,
+                    proposals.get(
+                        "|".join(
+                            (
+                                normalize_name(candidate.name),
+                                normalize_name(candidate.entity_type),
+                            )
+                        )
+                    ),
                 )
                 names[_normal(candidate.name)] = entity.entity_id
             for relationship in semantic.relationships:
@@ -169,10 +227,76 @@ class TKGFusionService:
                 conflict_count=len(snapshot.conflicts) - before_conflicts,
             )
 
-        return await self._registry.mutate_document(document_id, fuse)
+        result = await self._registry.mutate_document(document_id, fuse)
+        await self.sync_neo4j()
+        return result
 
     async def delete_document(self, document_id: str) -> None:
         await self._registry.delete_document(document_id)
+        await self.sync_neo4j()
+
+    async def sync_neo4j(self) -> None:
+        if self._neo4j_store is None:
+            return
+        snapshot = await self._registry.snapshot()
+        events = []
+        mentions = []
+        if self._event_registry is not None:
+            events, mentions, _, _ = await self._event_registry.snapshot()
+        await self._neo4j_store.replace_snapshot(
+            snapshot,
+            events=events,
+            event_mentions=mentions,
+        )
+
+    @staticmethod
+    def _event_resolution_candidates(
+        snapshot: TKGSnapshot,
+        semantic: SemanticExtractionBatch,
+        events: list[EventRecord],
+    ) -> list[SemanticEntityCandidate]:
+        semantic_names = {
+            normalize_name(name): item
+            for item in semantic.entities
+            for name in [item.name, *item.aliases]
+        }
+        existing_names: dict[str, list[EntityRecord]] = {}
+        for entity in snapshot.entities:
+            if entity.status != "active":
+                continue
+            for name in [entity.canonical_name, *entity.aliases]:
+                existing_names.setdefault(normalize_name(name), []).append(entity)
+        candidates: list[SemanticEntityCandidate] = []
+        seen = {normalize_name(item.name) for item in semantic.entities}
+        for event in events:
+            values = [*event.actors, *event.objects]
+            values.extend(
+                value
+                for fact in event.fact_effects
+                for value in (fact.subject, fact.object)
+            )
+            for value in values:
+                normalized = normalize_name(value)
+                if not normalized or normalized in seen:
+                    continue
+                semantic_match = semantic_names.get(normalized)
+                existing = existing_names.get(normalized, [])
+                entity_type = (
+                    semantic_match.entity_type
+                    if semantic_match is not None
+                    else existing[0].entity_type
+                    if len(existing) == 1
+                    else "Concept"
+                )
+                candidates.append(
+                    SemanticEntityCandidate(
+                        name=value,
+                        entity_type=entity_type,
+                        description=event.summary,
+                    )
+                )
+                seen.add(normalized)
+        return candidates
 
     def _resolve_entity(
         self,
@@ -180,9 +304,10 @@ class TKGFusionService:
         document_id: str,
         document_title: str,
         candidate: SemanticEntityCandidate,
+        proposal: EntityResolutionProposal | None = None,
     ) -> EntityRecord:
         normalized = _normal(candidate.name)
-        entity_type = _entity_type(candidate.entity_type)
+        entity_type = proposal.normalized_type if proposal else _entity_type(candidate.entity_type)
         matches = [
             item
             for item in snapshot.entities
@@ -190,14 +315,37 @@ class TKGFusionService:
             and normalized
             in {_normal(item.canonical_name), *(_normal(alias) for alias in item.aliases)}
         ]
-        if len(matches) == 1:
+        selected = (
+            next(
+                (
+                    item
+                    for item in snapshot.entities
+                    if proposal
+                    and item.entity_id == proposal.selected_entity_id
+                    and item.status == "active"
+                ),
+                None,
+            )
+            if proposal and proposal.action == ResolutionAction.MATCH_EXISTING
+            else None
+        )
+        if selected is not None:
+            entity = selected
+            action = ResolutionAction.MATCH_EXISTING
+            reason = proposal.reason
+        elif len(matches) == 1 and proposal is None:
             entity = matches[0]
             action = ResolutionAction.MATCH_EXISTING
             reason = "规范名或别名精确匹配，且本体类型一致。"
         else:
+            is_ambiguous = bool(
+                proposal
+                and proposal.action
+                in {ResolutionAction.AMBIGUOUS, ResolutionAction.REJECT}
+            ) or len(matches) > 1
             entity_id = (
                 _stable_id("entamb", document_id, entity_type, normalized)
-                if len(matches) > 1
+                if is_ambiguous
                 else _stable_id("ent", entity_type, normalized)
             )
             entity = next(
@@ -207,21 +355,41 @@ class TKGFusionService:
                 canonical_name=candidate.name,
                 entity_type=entity_type,
                 aliases=candidate.aliases,
+                description=candidate.description,
                 ontology_version=self._ontology_version,
             )
             if not any(item.entity_id == entity.entity_id for item in snapshot.entities):
                 snapshot.entities.append(entity)
-            action = (
-                ResolutionAction.AMBIGUOUS if len(matches) > 1 else ResolutionAction.CREATE_NEW
+            action = proposal.action if proposal else (
+                ResolutionAction.AMBIGUOUS
+                if len(matches) > 1
+                else ResolutionAction.CREATE_NEW
             )
-            reason = (
+            reason = proposal.reason if proposal else (
                 "存在多个同类型精确候选，未自动合并，创建隔离身份等待处理。"
                 if matches
                 else "未找到同类型的规范名或别名精确匹配。"
             )
+            if is_ambiguous:
+                review_id = _stable_id("rev", document_id, entity.entity_id)
+                if not any(item.review_id == review_id for item in snapshot.review_cases):
+                    snapshot.review_cases.append(
+                        EntityReviewCase(
+                            review_id=review_id,
+                            document_id=document_id,
+                            provisional_entity_id=entity.entity_id,
+                            candidate_name=candidate.name,
+                            candidate_type=entity_type,
+                            description=candidate.description,
+                            candidates=proposal.candidates if proposal else [],
+                            reason=reason,
+                        )
+                    )
         for alias in candidate.aliases:
             if _normal(alias) != _normal(entity.canonical_name) and alias not in entity.aliases:
                 entity.aliases.append(alias)
+        if candidate.description and not entity.description:
+            entity.description = candidate.description
         mention_id = _stable_id("emn", document_id, entity.entity_id, candidate.name)
         if not any(item.mention_id == mention_id for item in snapshot.entity_mentions):
             snapshot.entity_mentions.append(
@@ -244,8 +412,18 @@ class TKGFusionService:
                 candidate_type=entity_type,
                 action=action,
                 selected_entity_id=entity.entity_id,
-                candidate_entity_ids=[item.entity_id for item in matches],
+                candidate_entity_ids=(
+                    [item.entity_id for item in proposal.candidates]
+                    if proposal
+                    else [item.entity_id for item in matches]
+                ),
                 reason=reason,
+                similarity=(
+                    proposal.candidates[0].embedding_score
+                    if proposal and proposal.candidates
+                    else None
+                ),
+                decided_by=proposal.decided_by if proposal else "rule",
                 ontology_version=self._ontology_version,
             )
         )
@@ -342,7 +520,19 @@ class TKGFusionService:
         )
         assertion_id = _stable_id("ast", key)
         assertion = next(
-            (item for item in snapshot.assertions if item.assertion_id == assertion_id), None
+            (
+                item
+                for item in snapshot.assertions
+                if item.assertion_id == assertion_id
+                or (
+                    item.subject_id == subject_id
+                    and item.predicate_id == predicate_id
+                    and item.object_id == object_id
+                    and item.valid_from == valid_from
+                    and item.stated_valid_to == valid_to
+                )
+            ),
+            None,
         )
         if assertion is None:
             assertion = AssertionRecord(

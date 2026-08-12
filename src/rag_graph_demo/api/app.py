@@ -29,6 +29,9 @@ from rag_graph_demo.services.container import AppContainer
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.container = AppContainer(get_settings())
+    if app.state.container.neo4j_store is not None:
+        await app.state.container.neo4j_store.verify()
+        await app.state.container.neo4j_store.initialize_schema()
     try:
         yield
     finally:

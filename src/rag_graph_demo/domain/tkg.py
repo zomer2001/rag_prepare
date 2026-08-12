@@ -41,6 +41,14 @@ class ResolutionAction(StrEnum):
     REJECT = "reject"
 
 
+class GovernanceStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    DEFERRED = "deferred"
+    ROLLED_BACK = "rolled_back"
+
+
 class ConflictType(StrEnum):
     STANCE = "stance"
     TEMPORAL_VALUE = "temporal_value"
@@ -79,9 +87,12 @@ class EntityRecord(BaseModel):
     canonical_name: str = Field(min_length=1, max_length=500)
     entity_type: str = Field(min_length=1, max_length=100)
     aliases: list[str] = Field(default_factory=list)
+    description: str = Field(default="", max_length=4_000)
     ontology_version: str
     mention_ids: list[str] = Field(default_factory=list)
     source_document_ids: list[str] = Field(default_factory=list)
+    status: str = "active"
+    merged_into_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -182,6 +193,70 @@ class ResolutionDecision(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class EntityCandidateScore(BaseModel):
+    entity_id: str
+    canonical_name: str
+    entity_type: str
+    lexical_score: float = Field(ge=0, le=1)
+    embedding_score: float | None = Field(default=None, ge=-1, le=1)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class EntityResolutionProposal(BaseModel):
+    candidate_key: str
+    candidate_name: str
+    normalized_type: str
+    action: ResolutionAction
+    selected_entity_id: str | None = None
+    candidates: list[EntityCandidateScore] = Field(default_factory=list)
+    reason: str
+    decided_by: str
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class EntityReviewCase(BaseModel):
+    review_id: str
+    document_id: str
+    provisional_entity_id: str
+    candidate_name: str
+    candidate_type: str
+    description: str = ""
+    candidates: list[EntityCandidateScore] = Field(default_factory=list)
+    reason: str
+    status: GovernanceStatus = GovernanceStatus.PENDING
+    resolution_action: ResolutionAction | None = None
+    selected_entity_id: str | None = None
+    reviewer: str | None = None
+    reviewed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class AssertionCoalescence(BaseModel):
+    removed_assertion: AssertionRecord
+    survivor_assertion_id: str
+    moved_mention_ids: list[str] = Field(default_factory=list)
+    moved_effect_ids: list[str] = Field(default_factory=list)
+
+
+class EntityMergeRecord(BaseModel):
+    merge_id: str
+    source_entity: EntityRecord
+    target_entity_before: EntityRecord
+    target_entity_id: str
+    moved_entity_mention_ids: list[str] = Field(default_factory=list)
+    moved_assertion_subject_ids: list[str] = Field(default_factory=list)
+    moved_assertion_object_ids: list[str] = Field(default_factory=list)
+    moved_event_link_ids: list[str] = Field(default_factory=list)
+    assertion_coalescences: list[AssertionCoalescence] = Field(default_factory=list)
+    conflict_snapshots: list[ConflictCase] = Field(default_factory=list)
+    reason: str
+    actor: str
+    review_id: str | None = None
+    status: GovernanceStatus = GovernanceStatus.APPROVED
+    created_at: datetime = Field(default_factory=utc_now)
+    rolled_back_at: datetime | None = None
+
+
 class TKGSnapshot(BaseModel):
     schema_version: str = "1"
     ontology_version: str
@@ -193,6 +268,8 @@ class TKGSnapshot(BaseModel):
     event_effects: list[EventEffect] = Field(default_factory=list)
     conflicts: list[ConflictCase] = Field(default_factory=list)
     resolution_decisions: list[ResolutionDecision] = Field(default_factory=list)
+    review_cases: list[EntityReviewCase] = Field(default_factory=list)
+    merge_records: list[EntityMergeRecord] = Field(default_factory=list)
 
 
 class TKGIndexResult(BaseModel):
@@ -220,3 +297,15 @@ class TKGQueryResponse(BaseModel):
     mentions: list[AssertionMention] = Field(default_factory=list)
     effects: list[EventEffect] = Field(default_factory=list)
     conflicts: list[ConflictCase] = Field(default_factory=list)
+
+
+class ReviewDecisionRequest(BaseModel):
+    action: ResolutionAction
+    selected_entity_id: str | None = None
+    corrected_entity_type: str | None = None
+    reviewer: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
+class MergeRollbackRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=200)
