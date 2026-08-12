@@ -1,0 +1,64 @@
+@prefix tkg: <https://zomer2001.github.io/rag_prepare/ontology/tkg#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix time: <http://www.w3.org/2006/time#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix sem: <http://semanticweb.cs.vu.nl/2009/11/sem/> .
+
+<https://zomer2001.github.io/rag_prepare/ontology/tkg-core> a owl:Ontology ;
+  owl:versionInfo "0.1.0" ;
+  rdfs:comment "Statement-level temporal knowledge graph core ontology."@en .
+
+tkg:Entity a owl:Class ; rdfs:label "实体"@zh .
+tkg:Mention a owl:Class ; rdfs:subClassOf prov:Entity ; rdfs:label "来源提及"@zh .
+tkg:EntityMention a owl:Class ; rdfs:subClassOf tkg:Mention .
+tkg:AssertionMention a owl:Class ; rdfs:subClassOf tkg:Mention .
+tkg:EventMention a owl:Class ; rdfs:subClassOf tkg:Mention .
+tkg:Assertion a owl:Class ; rdfs:label "声明"@zh ;
+  rdfs:comment "A source-aware, temporally scoped subject-predicate-object claim."@en .
+tkg:Event a owl:Class ; rdfs:subClassOf sem:Event ; rdfs:label "事件"@zh .
+tkg:EventEffect a owl:Class ; rdfs:label "事件对声明的作用"@zh .
+tkg:ConflictCase a owl:Class ; rdfs:label "冲突案例"@zh .
+tkg:ResolutionDecision a owl:Class ; rdfs:label "消歧或冲突处理决定"@zh .
+tkg:SourceDocument a owl:Class ; rdfs:subClassOf prov:Entity .
+
+tkg:subject a owl:ObjectProperty ; rdfs:domain tkg:Assertion ; rdfs:range tkg:Entity .
+tkg:predicate a owl:ObjectProperty ; rdfs:domain tkg:Assertion .
+tkg:object a owl:ObjectProperty ; rdfs:domain tkg:Assertion ; rdfs:range tkg:Entity .
+tkg:mentionsEntity a owl:ObjectProperty ; rdfs:domain tkg:EntityMention ; rdfs:range tkg:Entity .
+tkg:supportsAssertion a owl:ObjectProperty ; rdfs:domain tkg:AssertionMention ; rdfs:range tkg:Assertion .
+tkg:mentionsEvent a owl:ObjectProperty ; rdfs:domain tkg:EventMention ; rdfs:range tkg:Event .
+tkg:fromDocument a owl:ObjectProperty ; rdfs:subPropertyOf prov:wasDerivedFrom ;
+  rdfs:domain tkg:Mention ; rdfs:range tkg:SourceDocument .
+tkg:hasEffect a owl:ObjectProperty ; rdfs:domain tkg:Event ; rdfs:range tkg:EventEffect .
+tkg:affectsAssertion a owl:ObjectProperty ; rdfs:domain tkg:EventEffect ; rdfs:range tkg:Assertion .
+tkg:inConflict a owl:ObjectProperty ; rdfs:domain tkg:ConflictCase ; rdfs:range tkg:Assertion .
+tkg:hasActor a owl:ObjectProperty ; rdfs:subPropertyOf sem:hasActor ;
+  rdfs:domain tkg:Event ; rdfs:range tkg:Entity .
+tkg:hasObject a owl:ObjectProperty ; rdfs:domain tkg:Event ; rdfs:range tkg:Entity .
+
+tkg:validFrom a owl:DatatypeProperty ; rdfs:domain tkg:Assertion ; rdfs:range xsd:string .
+tkg:validTo a owl:DatatypeProperty ; rdfs:domain tkg:Assertion ; rdfs:range xsd:string .
+tkg:recordedAt a owl:DatatypeProperty ; rdfs:range xsd:dateTime .
+tkg:invalidatedAt a owl:DatatypeProperty ; rdfs:domain tkg:Assertion ; rdfs:range xsd:dateTime .
+tkg:stance a owl:DatatypeProperty ; rdfs:domain tkg:Mention ; rdfs:range xsd:string .
+tkg:confidence a owl:DatatypeProperty ; rdfs:range xsd:decimal .
+tkg:effectType a owl:DatatypeProperty ; rdfs:domain tkg:EventEffect ; rdfs:range xsd:string .
+tkg:ontologyVersion a owl:DatatypeProperty ; rdfs:range xsd:string .
+tkg:canonicalName a owl:DatatypeProperty ; rdfs:domain tkg:Entity ; rdfs:range xsd:string .
+tkg:alias a owl:DatatypeProperty ; rdfs:subPropertyOf skos:altLabel ;
+  rdfs:domain tkg:Entity ; rdfs:range xsd:string .
+tkg:evidenceText a owl:DatatypeProperty ; rdfs:domain tkg:Mention ; rdfs:range xsd:string .
+tkg:sourceSegmentId a owl:DatatypeProperty ; rdfs:domain tkg:Mention ; rdfs:range xsd:string .
+tkg:status a owl:DatatypeProperty ; rdfs:range xsd:string .
+
+tkg:CREATES a tkg:EffectType .
+tkg:UPDATES a tkg:EffectType .
+tkg:TERMINATES a tkg:EffectType .
+tkg:SUPERSEDES a tkg:EffectType .
+tkg:DENIES a tkg:EffectType .
+tkg:CONFIRMS a tkg:EffectType .
+tkg:EffectType a owl:Class .

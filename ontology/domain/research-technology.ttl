@@ -1,0 +1,43 @@
+@prefix tkg: <https://zomer2001.github.io/rag_prepare/ontology/tkg#> .
+@prefix rt: <https://zomer2001.github.io/rag_prepare/ontology/research-technology#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<https://zomer2001.github.io/rag_prepare/ontology/research-technology> a owl:Ontology ;
+  owl:imports <https://zomer2001.github.io/rag_prepare/ontology/tkg-core> ;
+  owl:versionInfo "0.1.0" .
+
+rt:Person a owl:Class ; rdfs:subClassOf tkg:Entity .
+rt:Organization a owl:Class ; rdfs:subClassOf tkg:Entity .
+rt:Location a owl:Class ; rdfs:subClassOf tkg:Entity .
+rt:ResearchObject a owl:Class ; rdfs:subClassOf tkg:Entity .
+rt:Method a owl:Class ; rdfs:subClassOf rt:ResearchObject .
+rt:Model a owl:Class ; rdfs:subClassOf rt:ResearchObject .
+rt:Dataset a owl:Class ; rdfs:subClassOf rt:ResearchObject .
+rt:Material a owl:Class ; rdfs:subClassOf tkg:Entity .
+rt:Device a owl:Class ; rdfs:subClassOf rt:ResearchObject .
+rt:Concept a owl:Class ; rdfs:subClassOf tkg:Entity .
+rt:Program a owl:Class ; rdfs:subClassOf tkg:Entity .
+rt:Contract a owl:Class ; rdfs:subClassOf tkg:Entity .
+
+rt:ReleaseEvent a owl:Class ; rdfs:subClassOf tkg:Event .
+rt:DeploymentEvent a owl:Class ; rdfs:subClassOf tkg:Event .
+rt:ContractEvent a owl:Class ; rdfs:subClassOf tkg:Event .
+rt:PartnershipEvent a owl:Class ; rdfs:subClassOf tkg:Event .
+rt:InvestmentEvent a owl:Class ; rdfs:subClassOf tkg:Event .
+rt:TestEvent a owl:Class ; rdfs:subClassOf tkg:Event .
+rt:CorrectionEvent a owl:Class ; rdfs:subClassOf tkg:Event .
+rt:RetractionEvent a owl:Class ; rdfs:subClassOf tkg:Event .
+rt:TerminationEvent a owl:Class ; rdfs:subClassOf tkg:Event .
+
+rt:develops a owl:ObjectProperty ; rdfs:domain rt:Organization ; rdfs:range rt:ResearchObject .
+rt:uses a owl:ObjectProperty ; rdfs:range rt:ResearchObject .
+rt:evaluates a owl:ObjectProperty ; rdfs:range rt:ResearchObject .
+rt:trainedOn a owl:ObjectProperty ; rdfs:range rt:Dataset .
+rt:produces a owl:ObjectProperty .
+rt:participatesIn a owl:ObjectProperty .
+rt:partnersWith a owl:ObjectProperty ; a owl:SymmetricProperty .
+rt:locatedAt a owl:ObjectProperty ; rdfs:range rt:Location .
+rt:replaces a owl:ObjectProperty .
+rt:supports a owl:ObjectProperty .
+rt:contradicts a owl:ObjectProperty .

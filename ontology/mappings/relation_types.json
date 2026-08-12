@@ -1,0 +1,13 @@
+{
+  "development": "develops",
+  "production": "produces",
+  "usage": "uses",
+  "evaluation": "evaluates",
+  "benchmark usage": "evaluates",
+  "evidence support": "supports",
+  "contradiction": "contradicts",
+  "correction": "replaces",
+  "supersession": "replaces",
+  "location": "locatedAt",
+  "affiliation": "participatesIn"
+}

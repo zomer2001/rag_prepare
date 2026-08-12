@@ -1,0 +1,39 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix tkg: <https://zomer2001.github.io/rag_prepare/ontology/tkg#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+tkg:EntityShape a sh:NodeShape ;
+  sh:targetClass tkg:Entity ;
+  sh:property [ sh:path tkg:canonicalName ; sh:minCount 1 ; sh:maxCount 1 ; sh:minLength 1 ] ;
+  sh:property [ sh:path tkg:ontologyVersion ; sh:minCount 1 ; sh:maxCount 1 ] .
+
+tkg:AssertionShape a sh:NodeShape ;
+  sh:targetClass tkg:Assertion ;
+  sh:property [ sh:path tkg:subject ; sh:minCount 1 ; sh:maxCount 1 ; sh:class tkg:Entity ] ;
+  sh:property [ sh:path tkg:predicate ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path tkg:object ; sh:minCount 1 ; sh:maxCount 1 ; sh:class tkg:Entity ] ;
+  sh:property [ sh:path tkg:status ; sh:minCount 1 ; sh:maxCount 1 ;
+    sh:in ( "candidate" "active" "inactive" "disputed" "superseded" "retracted" ) ] ;
+  sh:property [ sh:path tkg:ontologyVersion ; sh:minCount 1 ; sh:maxCount 1 ] .
+
+tkg:MentionShape a sh:NodeShape ;
+  sh:targetClass tkg:AssertionMention ;
+  sh:targetClass tkg:EventMention ;
+  sh:property [ sh:path tkg:fromDocument ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path tkg:evidenceText ; sh:minCount 1 ; sh:minLength 1 ] ;
+  sh:property [ sh:path tkg:stance ; sh:minCount 1 ; sh:maxCount 1 ;
+    sh:in ( "asserted" "denied" "uncertain" "corrected" "retracted" ) ] .
+
+tkg:EntityMentionShape a sh:NodeShape ;
+  sh:targetClass tkg:EntityMention ;
+  sh:property [ sh:path tkg:fromDocument ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path tkg:evidenceText ; sh:minCount 1 ; sh:minLength 1 ] ;
+  sh:property [ sh:path tkg:mentionsEntity ; sh:minCount 1 ; sh:maxCount 1 ] .
+
+tkg:EventEffectShape a sh:NodeShape ;
+  sh:targetClass tkg:EventEffect ;
+  sh:property [ sh:path tkg:affectsAssertion ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path tkg:effectType ; sh:minCount 1 ; sh:maxCount 1 ;
+    sh:in ( "creates" "updates" "terminates" "supersedes" "denies" "confirms" ) ] ;
+  sh:property [ sh:path tkg:stance ; sh:minCount 1 ; sh:maxCount 1 ;
+    sh:in ( "asserted" "denied" "uncertain" "corrected" "retracted" ) ] .

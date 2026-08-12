@@ -1,0 +1,12 @@
+{
+  "Person": "Person",
+  "Organization": "Organization",
+  "Location": "Location",
+  "ResearchObject": "ResearchObject",
+  "Method": "Method",
+  "Model": "Model",
+  "Dataset": "Dataset",
+  "Material": "Material",
+  "Device": "Device",
+  "Concept": "Concept"
+}

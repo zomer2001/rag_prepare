@@ -1,0 +1,15 @@
+{
+  "发布": "ReleaseEvent",
+  "部署": "DeploymentEvent",
+  "合同": "ContractEvent",
+  "采购": "ContractEvent",
+  "合作": "PartnershipEvent",
+  "投资": "InvestmentEvent",
+  "测试": "TestEvent",
+  "实验": "TestEvent",
+  "纠正": "CorrectionEvent",
+  "更正": "CorrectionEvent",
+  "撤回": "RetractionEvent",
+  "终止": "TerminationEvent",
+  "取消": "TerminationEvent"
+}

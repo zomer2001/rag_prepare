@@ -100,6 +100,10 @@ EVENT_PROMPT_TEMPLATE = """从以下文档片段选择最多 5 个最关键事�
 - evidence：直接支持事件的原文证据；不限制长度，必要条件和结果不得为节省 token 而删减
 - stance：affirmed（肯定）、denied（明确否定）、uncertain（传闻或未确认）
 - confidence：仅依据该片段的抽取置信度，0 到 1
+- fact_effects：只填写该事件明确创建、更新、终止、替代、否认或确认的事实，最多 3 条；
+  每条包含 subject、predicate、object、effect_type、valid_from、valid_to、reason。
+  effect_type 只允许 creates/updates/terminates/supersedes/denies/confirms；predicate 使用最短、
+  稳定的关系词。若原文不能支持完整三元组则返回空数组，不得推测。
 
 文档标题：{title}
 片段序号：{part_number}/{part_count}

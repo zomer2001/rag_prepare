@@ -94,6 +94,17 @@ class EventRegistry:
                         time_precision=candidate.time_precision,
                         location=candidate.location,
                         result=candidate.result,
+                        fact_effects=candidate.fact_effects,
+                        stance=candidate.stance,
+                    )
+                elif candidate.fact_effects:
+                    known_effects = {
+                        item.model_dump_json() for item in events[event_id].fact_effects
+                    }
+                    events[event_id].fact_effects.extend(
+                        item
+                        for item in candidate.fact_effects
+                        if item.model_dump_json() not in known_effects
                     )
                 mention_key = "|".join(
                     (document_id, event_id, _normal(candidate.evidence)[:500])
@@ -266,6 +277,7 @@ class EventRegistry:
             sources = sorted({item.document_id for item in event_mentions})
             affirmed = [item for item in event_mentions if item.stance == "affirmed"]
             denied = [item for item in event_mentions if item.stance == "denied"]
+            uncertain = [item for item in event_mentions if item.stance == "uncertain"]
             base = sum(item.confidence for item in event_mentions) / max(len(event_mentions), 1)
             bonus = min(0.16, max(0, len(sources) - 1) * 0.08)
             event.confidence = round(max(0, min(1, base + bonus - (0.2 if denied else 0))), 3)
@@ -277,6 +289,12 @@ class EventRegistry:
                 event.status = EventStatus.SINGLE_SOURCE
             else:
                 event.status = EventStatus.CANDIDATE
+            if denied and not affirmed:
+                event.stance = "denied"
+            elif uncertain and not affirmed:
+                event.stance = "uncertain"
+            else:
+                event.stance = "affirmed"
             event.source_document_ids = sources
             event.mention_ids = sorted(item.mention_id for item in event_mentions)
             event.updated_at = now

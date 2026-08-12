@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from rag_graph_demo.domain.models import utc_now
+from rag_graph_demo.domain.tkg import EventEffectType
 
 
 class EventStatus(StrEnum):
@@ -26,6 +27,18 @@ class TimePrecision(StrEnum):
 EventStance = Literal["affirmed", "denied", "uncertain"]
 
 
+class EventFactCandidate(BaseModel):
+    """A fact whose lifecycle is explicitly changed by an event."""
+
+    subject: str = Field(min_length=1, max_length=500)
+    predicate: str = Field(min_length=1, max_length=200)
+    object: str = Field(min_length=1, max_length=500)
+    effect_type: EventEffectType
+    valid_from: str | None = None
+    valid_to: str | None = None
+    reason: str = Field(default="", max_length=1_000)
+
+
 class EventCandidate(BaseModel):
     event_type: str = Field(min_length=1, max_length=100)
     summary: str = Field(min_length=1, max_length=1_000)
@@ -41,6 +54,7 @@ class EventCandidate(BaseModel):
     evidence: str = Field(min_length=1, max_length=4_000)
     stance: EventStance = "affirmed"
     confidence: float = Field(default=0.65, ge=0, le=1)
+    fact_effects: list[EventFactCandidate] = Field(default_factory=list, max_length=3)
     source_segment_id: str | None = None
     source_segment_start: int | None = Field(default=None, ge=0)
     source_segment_end: int | None = Field(default=None, ge=0)
@@ -88,6 +102,8 @@ class EventRecord(BaseModel):
     time_precision: TimePrecision = TimePrecision.UNKNOWN
     location: str | None = None
     result: str | None = None
+    fact_effects: list[EventFactCandidate] = Field(default_factory=list)
+    stance: EventStance = "affirmed"
     status: EventStatus = EventStatus.CANDIDATE
     confidence: float = Field(default=0.5, ge=0, le=1)
     source_document_ids: list[str] = Field(default_factory=list)
