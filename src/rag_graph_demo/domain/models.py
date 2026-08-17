@@ -86,6 +86,7 @@ class QueryRequest(BaseModel):
     response_type: str = "Multiple Paragraphs"
     conversation_history: list[dict[str, str]] = Field(default_factory=list)
     use_events: bool = True
+    evidence_linking: bool = False
     event_limit: int = Field(default=12, ge=1, le=50)
 
 
@@ -122,5 +123,6 @@ class QueryResponse(BaseModel):
     events: list[dict[str, Any]] = Field(default_factory=list)
     event_relations: list[dict[str, Any]] = Field(default_factory=list)
     event_conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_graph: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     elapsed_ms: int

@@ -9,11 +9,14 @@ from pydantic import BaseModel
 from rag_graph_demo.agentic.models import (
     EvidenceAssessment,
     GroundedAnswer,
+    KnowledgeNeedState,
     ModelCall,
     QueryRewrite,
 )
 from rag_graph_demo.agentic.prompts import (
     EVIDENCE_ASSESSMENT_SYSTEM,
+    EVONEED_ASSESS_SYSTEM,
+    EVONEED_PLAN_SYSTEM,
     GROUNDED_ANSWER_SYSTEM,
     QUERY_REWRITE_SYSTEM,
     evidence_context,
@@ -75,6 +78,36 @@ class DeepSeekAgentModel:
         return await self._json_call(
             EvidenceAssessment,
             EVIDENCE_ASSESSMENT_SYSTEM,
+            user,
+            model=self.settings.deepseek_extraction_model,
+        )
+
+    async def plan_needs(self, question: str) -> ModelCall[KnowledgeNeedState]:
+        user = f"Question: {question}\n\nReturn JSON only."
+        return await self._json_call(
+            KnowledgeNeedState,
+            EVONEED_PLAN_SYSTEM,
+            user,
+            model=self.settings.deepseek_extraction_model,
+        )
+
+    async def assess_needs(
+        self,
+        question: str,
+        need_state: KnowledgeNeedState,
+        evidence: list[RetrievedChunk],
+        *,
+        retrieval_round: int,
+    ) -> ModelCall[KnowledgeNeedState]:
+        user = (
+            f"Question: {question}\nRetrieval round: {retrieval_round}\n\n"
+            "Previous KnowledgeNeedState:\n"
+            f"{need_state.model_dump_json()}\n\n"
+            f"Evidence:\n{evidence_context(evidence)}\n\nReturn JSON only."
+        )
+        return await self._json_call(
+            KnowledgeNeedState,
+            EVONEED_ASSESS_SYSTEM,
             user,
             model=self.settings.deepseek_extraction_model,
         )

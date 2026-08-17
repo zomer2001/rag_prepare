@@ -13,11 +13,14 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
+from rag_graph_demo.agentic.evoneed import EvoNeedRAGGraph
 from rag_graph_demo.agentic.graph import AgenticRAGGraph
 from rag_graph_demo.agentic.model import DeepSeekAgentModel
-from rag_graph_demo.agentic.models import AgenticRun
+from rag_graph_demo.agentic.models import AgenticRun, NeedItem
 from rag_graph_demo.agentic.prompts import (
     AGENTIC_PROMPT_PROFILE_VERSION,
+    EVONEED_PROMPT_PROFILE_VERSION,
+    evoneed_prompt_profile_digest,
     prompt_profile_digest,
 )
 from rag_graph_demo.config import Settings
@@ -42,16 +45,36 @@ from rag_graph_demo.lightrag_engine.local_models import (
     embedding_model_name,
 )
 from rag_graph_demo.retrieval.event_vector import EventVectorIndex
+from rag_graph_demo.retrieval.models import RetrievalChannel
 from rag_graph_demo.retrieval.orchestrator import UnifiedRetrievalOrchestrator
-from rag_graph_demo.retrieval.planner import QUERY_PLANNER_PROFILE_VERSION, QueryPlanner
+from rag_graph_demo.retrieval.planner import (
+    QUERY_PLANNER_PROFILE_VERSION,
+    TKG_PLANNER_PROMPT,
+    TKG_QUERY_PLANNER_PROFILE_VERSION,
+    QueryPlanner,
+)
+from rag_graph_demo.retrieval.tkg_retriever import UnifiedTKGRetriever
+from rag_graph_demo.retrieval.tkg_vector import TKGVectorIndex, tkg_vector_fingerprint
+from rag_graph_demo.services.entity_resolution_service import (
+    EntityResolutionService,
+    OntologyTypeMapper,
+)
 from rag_graph_demo.services.event_service import (
     EVENT_EXTRACTION_PROFILE_VERSION,
     EventService,
     LLMEventExtractor,
 )
+from rag_graph_demo.services.ontology_service import OntologyService
+from rag_graph_demo.services.semantic_extraction_service import (
+    SEMANTIC_EXTRACTION_PROFILE_VERSION,
+    LLMSemanticExtractor,
+)
+from rag_graph_demo.services.tkg_fusion_service import TKGFusionService
 from rag_graph_demo.storage.atomic_json import read_json, write_json_atomic
 from rag_graph_demo.storage.document_registry import DocumentRegistry
 from rag_graph_demo.storage.event_registry import EventRegistry
+from rag_graph_demo.storage.neo4j_tkg_store import Neo4jTKGStore
+from rag_graph_demo.storage.tkg_registry import TKGRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +84,54 @@ VALID_METHODS = (
     "light",
     "light_entity",
     "ours",
+    "ours_evolink",
+    "ours_evoneed",
+    "ours_tkg",
+    "ours_tkg_dynamic",
     "agentic_hybrid",
     "agentic_light_entity",
     "agentic_ours",
+    "agentic_ours_evolink",
+    "agentic_ours_tkg",
+    "agentic_ours_tkg_dynamic",
 )
-AGENTIC_METHODS = {"agentic_hybrid", "agentic_light_entity", "agentic_ours"}
-CONTROLLED_METHODS = {"light_entity", "ours", "agentic_light_entity", "agentic_ours"}
-EVENT_METHODS = {"ours", "agentic_ours"}
+AGENTIC_METHODS = {
+    "agentic_hybrid",
+    "agentic_light_entity",
+    "agentic_ours",
+    "agentic_ours_evolink",
+    "ours_evoneed",
+    "agentic_ours_tkg",
+    "agentic_ours_tkg_dynamic",
+}
+CONTROLLED_METHODS = {
+    "light_entity",
+    "ours",
+    "ours_evolink",
+    "ours_evoneed",
+    "agentic_light_entity",
+    "agentic_ours",
+    "agentic_ours_evolink",
+}
+EVENT_METHODS = {
+    "ours",
+    "ours_evolink",
+    "ours_evoneed",
+    "agentic_ours",
+    "agentic_ours_evolink",
+}
+EVOLINK_METHODS = {"ours_evolink", "ours_evoneed", "agentic_ours_evolink"}
+EVONEED_METHODS = {"ours_evoneed"}
+TKG_METHODS = {
+    "ours_tkg",
+    "ours_tkg_dynamic",
+    "agentic_ours_tkg",
+    "agentic_ours_tkg_dynamic",
+}
 DENSE_METHODS = {"naive", "hybrid", "agentic_hybrid"}
 HYBRID_METHODS = {"hybrid", "agentic_hybrid"}
 UNIFIED_RETRIEVAL_PROFILE_VERSION = "three_path_v2_soft_event_hints"
+TKG_RETRIEVAL_PROFILE_VERSION = "unified_statement_tkg_v1"
 LIGHTRAG_BENCHMARK_INPUT_VERSION = "unique_chunk_identity_v1"
 
 
@@ -179,7 +240,13 @@ class EvaluationRunner:
         self.light_entity_engine: LightRAGEngine | None = None
         self.event_service: EventService | None = None
         self.unified_orchestrator: UnifiedRetrievalOrchestrator | None = None
-        self.agentic_graphs: dict[str, AgenticRAGGraph] = {}
+        self.agentic_graphs: dict[str, AgenticRAGGraph | EvoNeedRAGGraph] = {}
+        self.tkg_retriever: UnifiedTKGRetriever | None = None
+        self.tkg_dynamic_retriever: UnifiedTKGRetriever | None = None
+        self.tkg_vector_index: TKGVectorIndex | None = None
+        self.tkg_graph_store: Neo4jTKGStore | None = None
+        self.evolink_graph_store: Neo4jTKGStore | None = None
+        self.tkg_extraction_engine: LightRAGEngine | None = None
         self.file_path_to_document: dict[str, str] = {}
 
     async def run(self) -> dict[str, Any]:
@@ -207,7 +274,9 @@ class EvaluationRunner:
             assert dense is not None
             hybrid = HybridRetriever(dense)
 
-        if {"light", *CONTROLLED_METHODS, *AGENTIC_METHODS} & set(self.methods):
+        if {"light", *CONTROLLED_METHODS, *AGENTIC_METHODS, *TKG_METHODS} & set(
+            self.methods
+        ):
             self._require_light_environment()
         if "light" in self.methods:
             registry = DocumentRegistry(self.runtime_dir / "registry" / "light_documents.json")
@@ -273,7 +342,19 @@ class EvaluationRunner:
                 event_vector_index=event_vector,
                 document_id_resolver=resolve_document_id,
                 strict_event_failures=True,
+                strict_coordination_failures=True,
             )
+        if EVOLINK_METHODS & set(self.methods):
+            await self._ensure_evolink_index()
+            if (
+                self.unified_orchestrator is not None
+                and self.evolink_graph_store is not None
+            ):
+                self.unified_orchestrator.bind_coordination_store(
+                    self.evolink_graph_store
+                )
+        if TKG_METHODS & set(self.methods):
+            await self._ensure_tkg_index()
         if AGENTIC_METHODS & set(self.methods):
             agent_model = DeepSeekAgentModel(self.eval_settings)
             if "agentic_hybrid" in self.methods:
@@ -292,6 +373,30 @@ class EvaluationRunner:
                     self._retrieve_ours,
                     agent_model,
                 )
+            if "agentic_ours_evolink" in self.methods:
+                self.agentic_graphs["agentic_ours_evolink"] = AgenticRAGGraph(
+                    self._retrieve_ours_evolink,
+                    agent_model,
+                )
+            if "ours_evoneed" in self.methods:
+                self.agentic_graphs["ours_evoneed"] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_action,
+                    agent_model,
+                )
+            if "agentic_ours_tkg" in self.methods:
+                if self.tkg_retriever is None:
+                    raise RuntimeError("Unified TKG retriever is not initialized")
+                self.agentic_graphs["agentic_ours_tkg"] = AgenticRAGGraph(
+                    self.tkg_retriever.retrieve,
+                    agent_model,
+                )
+            if "agentic_ours_tkg_dynamic" in self.methods:
+                if self.tkg_dynamic_retriever is None:
+                    raise RuntimeError("Dynamic TKG retriever is not initialized")
+                self.agentic_graphs["agentic_ours_tkg_dynamic"] = AgenticRAGGraph(
+                    self.tkg_dynamic_retriever.retrieve,
+                    agent_model,
+                )
 
         summaries: dict[str, Any] = {}
         try:
@@ -302,6 +407,8 @@ class EvaluationRunner:
                 summary["retrieval_diagnostics"] = retrieval_diagnostics(per_query)
                 if method in AGENTIC_METHODS:
                     summary["agentic_diagnostics"] = agentic_diagnostics(per_query)
+                if method in EVONEED_METHODS:
+                    summary["evoneed_diagnostics"] = evoneed_diagnostics(per_query)
                 summaries[method] = summary
                 self._write_method_summary(method, summary)
             result = {
@@ -323,6 +430,13 @@ class EvaluationRunner:
             }
             if AGENTIC_METHODS & set(self.methods):
                 result["agentic_profile"] = AGENTIC_PROMPT_PROFILE_VERSION
+            if EVONEED_METHODS & set(self.methods):
+                result["evoneed_profile"] = EVONEED_PROMPT_PROFILE_VERSION
+            if TKG_METHODS & set(self.methods):
+                result["tkg_retrieval_profile"] = TKG_RETRIEVAL_PROFILE_VERSION
+                result["tkg_query_planner_profile"] = TKG_QUERY_PLANNER_PROFILE_VERSION
+            if EVOLINK_METHODS & set(self.methods):
+                result["evolink_retrieval_profile"] = "ours_evolink_v1"
             (self.output_dir / "summary.json").write_text(
                 json.dumps(result, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -331,10 +445,20 @@ class EvaluationRunner:
             self._write_summary_markdown(result)
             return result
         finally:
-            engines = [self.light_engine, self.light_entity_engine]
+            engines = [
+                self.light_engine,
+                self.light_entity_engine,
+                self.tkg_extraction_engine,
+            ]
             for engine in engines:
                 if engine is not None:
                     await engine.finalize()
+            if self.tkg_vector_index is not None:
+                await self.tkg_vector_index.close()
+            if self.tkg_graph_store is not None:
+                await self.tkg_graph_store.close()
+            if self.evolink_graph_store is not None:
+                await self.evolink_graph_store.close()
 
     def _method_retriever(
         self,
@@ -354,8 +478,26 @@ class EvaluationRunner:
             return self._retrieve_light_entity
         if method == "ours":
             return self._retrieve_ours
+        if method == "ours_evolink":
+            return self._retrieve_ours_evolink
+        if method == "ours_evoneed":
+            return self._retrieve_ours_evoneed
+        if method == "ours_tkg":
+            if self.tkg_retriever is None:
+                raise RuntimeError("Unified TKG retriever is not initialized")
+            return self.tkg_retriever.retrieve
+        if method == "ours_tkg_dynamic":
+            if self.tkg_dynamic_retriever is None:
+                raise RuntimeError("Dynamic TKG retriever is not initialized")
+            return self.tkg_dynamic_retriever.retrieve
         if method == "agentic_ours":
             return self._retrieve_agentic_ours
+        if method == "agentic_ours_evolink":
+            return self._retrieve_agentic_ours_evolink
+        if method == "agentic_ours_tkg":
+            return self._retrieve_agentic_ours_tkg
+        if method == "agentic_ours_tkg_dynamic":
+            return self._retrieve_agentic_ours_tkg_dynamic
         if method == "agentic_light_entity":
             return self._retrieve_agentic_light_entity
         if method == "agentic_hybrid":
@@ -647,6 +789,306 @@ class EvaluationRunner:
             },
         )
 
+    async def _ensure_evolink_index(self) -> None:
+        """Mirror existing semantic/event knowledge into one governed Neo4j graph."""
+        if self.light_entity_engine is None or self.event_service is None:
+            raise RuntimeError("EvoLink requires the controlled graph and event indexes")
+        fingerprint = hashlib.sha256(
+            (
+                f"ours_evolink_v1\x1f{self.light_entity_fingerprint}\x1f"
+                f"{self.event_fingerprint}\x1f"
+                f"{self.eval_settings.tkg_ontology_version}\x1f"
+                f"{self.eval_settings.entity_resolution_auto_match_threshold}"
+            ).encode()
+        ).hexdigest()
+        evolink_dir = self.runtime_dir / "evolink" / fingerprint[:16]
+        registry = TKGRegistry(
+            evolink_dir / "graph_store.json",
+            ontology_version=self.eval_settings.tkg_ontology_version,
+        )
+        event_registry = EventRegistry(
+            self.runtime_dir / "events" / "event_store.json"
+        )
+        workspace_id = (
+            f"eval_{safe_name(self.dataset.name)}_"
+            f"{self.fingerprint[:12]}_evolink_v1"
+        )
+        self.evolink_graph_store = Neo4jTKGStore(
+            self.eval_settings.neo4j_uri,
+            self.eval_settings.neo4j_user,
+            self.eval_settings.neo4j_password,
+            database=self.eval_settings.neo4j_database,
+            workspace_id=workspace_id,
+        )
+        await self.evolink_graph_store.initialize_schema()
+        resolver = EntityResolutionService(
+            OntologyTypeMapper(self.eval_settings.entity_type_mapping_file),
+            self.light_entity_engine.embed_texts,
+            self.light_entity_engine.complete_extraction,
+            candidate_limit=self.eval_settings.entity_resolution_candidate_limit,
+            embedding_threshold=(
+                self.eval_settings.entity_resolution_embedding_threshold
+            ),
+            auto_match_threshold=(
+                self.eval_settings.entity_resolution_auto_match_threshold
+            ),
+            llm_threshold=self.eval_settings.entity_resolution_llm_threshold,
+        )
+        fusion = TKGFusionService(
+            registry,
+            ontology_version=self.eval_settings.tkg_ontology_version,
+            entity_resolver=resolver,
+            neo4j_store=None,
+            event_registry=event_registry,
+        )
+        checkpoint_path = evolink_dir / "document_index.json"
+        checkpoint = read_json(checkpoint_path, default={})
+        completed = (
+            set(checkpoint.get("documents") or [])
+            if checkpoint.get("fingerprint") == fingerprint
+            else set()
+        )
+        events = await self.event_service.list_events()
+        progress = tqdm(
+            total=len(self.documents),
+            initial=len(completed),
+            desc="ours_evolink:governance",
+            unit="doc",
+            dynamic_ncols=True,
+            disable=not self.show_progress,
+        )
+        try:
+            for document in self.documents:
+                if document.document_id in completed:
+                    continue
+                semantic = (
+                    await self.light_entity_engine.get_document_semantic_extraction(
+                        document.document_id
+                    )
+                )
+                document_events = [
+                    event
+                    for event in events
+                    if document.document_id in event.source_document_ids
+                ]
+                await fusion.index_document(
+                    document.document_id,
+                    document.title,
+                    semantic,
+                    document_events,
+                )
+                completed.add(document.document_id)
+                write_json_atomic(
+                    checkpoint_path,
+                    {
+                        "fingerprint": fingerprint,
+                        "documents": sorted(completed),
+                    },
+                )
+                progress.update(1)
+                progress.set_postfix_str(document.title[:36], refresh=False)
+        finally:
+            progress.close()
+        snapshot = await registry.snapshot()
+        _, event_mentions, event_relations, _ = await event_registry.snapshot()
+        await self.evolink_graph_store.replace_snapshot(
+            snapshot,
+            events=events,
+            event_mentions=event_mentions,
+            event_relations=event_relations,
+        )
+
+    async def _ensure_tkg_index(self) -> None:
+        """Build one statement TKG without creating the legacy LightRAG graph index."""
+        if self.eval_settings.embedding_provider != "zhipu":
+            raise RuntimeError(
+                "ours_tkg evaluation currently requires EMBEDDING_PROVIDER=zhipu "
+                "to keep entity resolution and all five vector indexes comparable."
+            )
+        workspace_id = (
+            f"eval_{safe_name(self.dataset.name)}_{self.fingerprint[:12]}_tkg_v1"
+            f"{'_open' if self.eval_settings.tkg_schema_mode == 'open' else ''}"
+        )
+        knowledge_schema_version = (
+            "open-v1"
+            if self.eval_settings.tkg_schema_mode == "open"
+            else self.eval_settings.tkg_ontology_version
+        )
+        index_fingerprint = hashlib.sha256(
+            (
+                f"{self.fingerprint}\x1f{SEMANTIC_EXTRACTION_PROFILE_VERSION}\x1f"
+                f"{EVENT_EXTRACTION_PROFILE_VERSION}\x1f"
+                f"{self.eval_settings.tkg_ontology_version}"
+                + (
+                    "\x1fopen_schema_v1"
+                    if self.eval_settings.tkg_schema_mode == "open"
+                    else ""
+                )
+            ).encode()
+        ).hexdigest()
+        tkg_dir = self.runtime_dir / "tkg" / index_fingerprint[:16]
+        event_registry = EventRegistry(tkg_dir / "event_store.json")
+        registry = TKGRegistry(
+            tkg_dir / "tkg_store.json",
+            ontology_version=knowledge_schema_version,
+            validate_snapshot=(
+                OntologyService(
+                    self.eval_settings.tkg_ontology_dir
+                ).validate_snapshot
+                if self.eval_settings.tkg_schema_mode == "ontology"
+                else None
+            ),
+        )
+        # This engine is an LLM/embedding client only. We intentionally never call
+        # initialize(), index_document(), or retrieve_data(), so no LightRAG graph,
+        # KV, document-status, or LightRAG Qdrant collection is created for ours_tkg.
+        tkg_embedding = build_embedding_func(self.eval_settings)
+        self.tkg_extraction_engine = LightRAGEngine(
+            self.eval_settings,
+            SourceMapper(DocumentRegistry(tkg_dir / "extraction_documents.json")),
+            embedding_func=tkg_embedding,
+        )
+        semantic_extractor = LLMSemanticExtractor(
+            self.tkg_extraction_engine.complete_extraction,
+            prompt_file=(
+                self.eval_settings.light_entity_prompt_file
+                if self.eval_settings.tkg_schema_mode == "ontology"
+                else Path("prompts/entity_type/open_schema.yaml")
+            ),
+            max_entities=self.eval_settings.light_entity_max_entities,
+            max_relationships=self.eval_settings.light_entity_max_relationships,
+        )
+        event_extractor = LLMEventExtractor(
+            self.tkg_extraction_engine,
+            chunk_chars=self.eval_settings.event_extraction_chunk_chars,
+            max_events=self.eval_settings.event_extraction_max_events,
+            max_events_per_part=self.eval_settings.event_extraction_max_events_per_part,
+        )
+        event_service = EventService(event_registry, event_extractor)
+        self.tkg_graph_store = Neo4jTKGStore(
+            self.eval_settings.neo4j_uri,
+            self.eval_settings.neo4j_user,
+            self.eval_settings.neo4j_password,
+            database=self.eval_settings.neo4j_database,
+            workspace_id=workspace_id,
+        )
+        await self.tkg_graph_store.initialize_schema()
+        resolver = EntityResolutionService(
+            OntologyTypeMapper(self.eval_settings.entity_type_mapping_file),
+            tkg_embedding,
+            self.tkg_extraction_engine.complete_extraction,
+            candidate_limit=self.eval_settings.entity_resolution_candidate_limit,
+            embedding_threshold=self.eval_settings.entity_resolution_embedding_threshold,
+            auto_match_threshold=self.eval_settings.entity_resolution_auto_match_threshold,
+            llm_threshold=self.eval_settings.entity_resolution_llm_threshold,
+            enforce_type=self.eval_settings.tkg_schema_mode == "ontology",
+        )
+        tkg_service = TKGFusionService(
+            registry,
+            ontology_version=knowledge_schema_version,
+            entity_resolver=resolver,
+            neo4j_store=None,
+            event_registry=event_registry,
+        )
+        checkpoint_path = tkg_dir / "document_index.json"
+        checkpoint = read_json(checkpoint_path, default={})
+        completed = (
+            set(checkpoint.get("documents") or [])
+            if checkpoint.get("fingerprint") == index_fingerprint
+            else set()
+        )
+        progress = tqdm(
+            total=len(self.documents),
+            initial=len(completed),
+            desc="ours_tkg:index",
+            unit="doc",
+            dynamic_ncols=True,
+            disable=not self.show_progress,
+        )
+        try:
+            chunks_by_document: dict[str, list[BenchmarkChunk]] = defaultdict(list)
+            for chunk in self.chunks:
+                chunks_by_document[chunk.document_id].append(chunk)
+            for document in self.documents:
+                if document.document_id in completed:
+                    continue
+                segments = [
+                    (chunk.chunk_id, chunk.text)
+                    for chunk in chunks_by_document[document.document_id]
+                ]
+                semantic = await semantic_extractor.extract(document.title, segments)
+                events = await event_service.index_document(
+                    document.document_id,
+                    document.title,
+                    f"{document.metadata_text()}\n\n{document.text}",
+                )
+                await tkg_service.index_document(
+                    document.document_id,
+                    document.title,
+                    semantic,
+                    events,
+                )
+                completed.add(document.document_id)
+                write_json_atomic(
+                    checkpoint_path,
+                    {
+                        "fingerprint": index_fingerprint,
+                        "documents": sorted(completed),
+                    },
+                )
+                progress.update(1)
+                progress.set_postfix_str(document.title[:36], refresh=False)
+        finally:
+            progress.close()
+        snapshot = await registry.snapshot()
+        events, event_mentions, event_relations, _ = await event_registry.snapshot()
+        await self.tkg_graph_store.replace_snapshot(
+            snapshot,
+            events=events,
+            event_mentions=event_mentions,
+            event_relations=event_relations,
+        )
+        vector_fingerprint = tkg_vector_fingerprint(
+            index_fingerprint,
+            snapshot,
+            events,
+        )
+        self.tkg_vector_index = TKGVectorIndex(
+            qdrant_url=self.eval_settings.qdrant_url,
+            qdrant_api_key=self.eval_settings.qdrant_api_key,
+            workspace_id=workspace_id,
+            dimension=self.eval_settings.embedding_dimension,
+            embed=tkg_embedding,
+            manifest_path=tkg_dir / "vector_index.json",
+            batch_size=self.eval_settings.embedding_batch_size,
+            max_concurrency=self.eval_settings.effective_embedding_concurrency,
+            show_progress=self.show_progress,
+        )
+        await self.tkg_vector_index.initialize(
+            snapshot,
+            events,
+            self.chunks,
+            fingerprint=vector_fingerprint,
+        )
+        planner = QueryPlanner(
+            self.tkg_extraction_engine.complete_extraction,
+            cache_path=tkg_dir / "query_plan_cache.json",
+            strict_failures=True,
+            profile=TKG_QUERY_PLANNER_PROFILE_VERSION,
+            prompt_template=TKG_PLANNER_PROMPT,
+        )
+        self.tkg_retriever = UnifiedTKGRetriever(
+            planner,
+            self.tkg_vector_index,
+            self.tkg_graph_store,
+        )
+        self.tkg_dynamic_retriever = UnifiedTKGRetriever(
+            planner,
+            self.tkg_vector_index,
+            self.tkg_graph_store,
+            dynamic=True,
+        )
+
     async def _retrieve_light(self, question: str, top_k: int) -> list[RetrievedChunk]:
         if self.light_engine is None:
             raise RuntimeError("Stock LightRAG index is not initialized")
@@ -677,8 +1119,75 @@ class EvaluationRunner:
             raise RuntimeError("Event index is not initialized")
         return await self._retrieve_unified(question, top_k, include_events=True)
 
+    async def _retrieve_ours_evolink(
+        self,
+        question: str,
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        if self.event_service is None or self.evolink_graph_store is None:
+            raise RuntimeError("EvoLink event and Neo4j indexes are not initialized")
+        return await self._retrieve_unified(
+            question,
+            top_k,
+            include_events=True,
+            link_evidence=True,
+        )
+
     async def _retrieve_agentic_ours(self, question: str, top_k: int) -> AgenticRun:
         return await self._retrieve_agentic("agentic_ours", question, top_k)
+
+    async def _retrieve_agentic_ours_evolink(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic(
+            "agentic_ours_evolink", question, top_k
+        )
+
+    async def _retrieve_ours_evoneed(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic("ours_evoneed", question, top_k)
+
+    async def _retrieve_evoneed_action(
+        self,
+        need: NeedItem,
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        if need.need_id == "need_question_anchor":
+            return await self._retrieve_unified(
+                need.query,
+                top_k,
+                include_events=True,
+                link_evidence=True,
+                channels=None,
+            )
+        return await self._retrieve_unified(
+            need.query,
+            top_k,
+            include_events=need.route == "event",
+            link_evidence=True,
+            channels={need.route},
+        )
+
+    async def _retrieve_agentic_ours_tkg(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic("agentic_ours_tkg", question, top_k)
+
+    async def _retrieve_agentic_ours_tkg_dynamic(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic(
+            "agentic_ours_tkg_dynamic", question, top_k
+        )
 
     async def _retrieve_agentic_light_entity(
         self,
@@ -713,6 +1222,8 @@ class EvaluationRunner:
         top_k: int,
         *,
         include_events: bool,
+        link_evidence: bool = False,
+        channels: set[RetrievalChannel] | None = None,
     ) -> list[RetrievedChunk]:
         if self.unified_orchestrator is None:
             raise RuntimeError("Unified retrieval orchestrator is not initialized")
@@ -720,6 +1231,8 @@ class EvaluationRunner:
             question,
             top_k=top_k,
             include_events=include_events,
+            link_evidence=link_evidence,
+            channels=channels,
         )
         return [
             RetrievedChunk(
@@ -745,6 +1258,8 @@ class EvaluationRunner:
                         for item in bundle.passages
                     ],
                     "query_plan": result.plan.model_dump(mode="json"),
+                    "evidence_graph": result.evidence_graph,
+                    "evolink": result.metadata.get("evolink", {}),
                 },
             )
             for bundle in result.bundles
@@ -769,6 +1284,25 @@ class EvaluationRunner:
             "retrieval_profile": UNIFIED_RETRIEVAL_PROFILE_VERSION,
             "query_planner_profile": QUERY_PLANNER_PROFILE_VERSION,
         }
+        if TKG_METHODS & set(self.methods):
+            expected["tkg_profile"] = {
+                "retrieval": TKG_RETRIEVAL_PROFILE_VERSION,
+                "planner": TKG_QUERY_PLANNER_PROFILE_VERSION,
+                "semantic_extraction": SEMANTIC_EXTRACTION_PROFILE_VERSION,
+                "event_extraction": EVENT_EXTRACTION_PROFILE_VERSION,
+                "ontology_version": (
+                    "open-v1"
+                    if self.eval_settings.tkg_schema_mode == "open"
+                    else self.eval_settings.tkg_ontology_version
+                ),
+                "workspace": (
+                    f"eval_{safe_name(self.dataset.name)}_{self.fingerprint[:12]}_tkg_v1"
+                    f"{'_open' if self.eval_settings.tkg_schema_mode == 'open' else ''}"
+                ),
+            }
+            if self.eval_settings.tkg_schema_mode == "open":
+                expected["tkg_profile"]["schema_mode"] = "open"
+                expected["tkg_profile"]["schema_version"] = "open-v1"
         if AGENTIC_METHODS & set(self.methods):
             expected["agentic_profile"] = {
                 "version": AGENTIC_PROMPT_PROFILE_VERSION,
@@ -780,6 +1314,18 @@ class EvaluationRunner:
                 ),
                 "rrf_k": self.eval_settings.agentic_rrf_k,
                 "methods": sorted(set(self.methods) & AGENTIC_METHODS),
+            }
+        if EVONEED_METHODS & set(self.methods):
+            expected["evoneed_profile"] = {
+                "version": EVONEED_PROMPT_PROFILE_VERSION,
+                "prompt_digest": evoneed_prompt_profile_digest(),
+                "knowledge_types": [
+                    "text_evidence",
+                    "relation_evidence",
+                    "evolution_evidence",
+                ],
+                "selective_routes": ["vector", "graph", "event"],
+                "cross_path_expansion": "evolink",
             }
         if self.chunking_strategy != "fixed":
             expected["chunking_strategy"] = self.chunking_strategy
@@ -914,19 +1460,25 @@ def retrieval_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Expose whether each retrieval path actually reaches final Top-K evidence."""
     channel_query_counts = {channel: 0 for channel in ("vector", "graph", "event")}
     channel_document_counts = {channel: 0 for channel in channel_query_counts}
+    evolink_runs: list[dict[str, Any]] = []
     for row in rows:
         channels_in_query: set[str] = set()
-        for item in row.get("retrieved") or []:
+        retrieved = row.get("retrieved") or []
+        for item in retrieved:
             channels = set((item.get("metadata") or {}).get("channels") or [])
             channels_in_query.update(channels)
             for channel in channels:
                 if channel in channel_document_counts:
                     channel_document_counts[channel] += 1
+        if retrieved:
+            evolink = (retrieved[0].get("metadata") or {}).get("evolink")
+            if isinstance(evolink, dict):
+                evolink_runs.append(evolink)
         for channel in channels_in_query:
             if channel in channel_query_counts:
                 channel_query_counts[channel] += 1
     query_count = len(rows)
-    return {
+    diagnostics = {
         "channel_query_counts": channel_query_counts,
         "channel_query_rates": {
             channel: count / query_count if query_count else 0.0
@@ -936,7 +1488,44 @@ def retrieval_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             channel: count / query_count if query_count else 0.0
             for channel, count in channel_document_counts.items()
         },
+        "tkg_seed_counts": {
+            kind: sum(
+                int(
+                    ((item.get("metadata") or {}).get("tkg_seed_counts") or {}).get(
+                        kind, 0
+                    )
+                )
+                for row in rows
+                for item in (row.get("retrieved") or [])[:1]
+            )
+            for kind in ("entity", "predicate", "assertion", "event")
+        },
     }
+    if evolink_runs:
+        evolink_query_count = len(evolink_runs)
+        diagnostics["evolink_coordination"] = {
+            "query_count": evolink_query_count,
+            **{
+                field: sum(int(item.get(field) or 0) for item in evolink_runs)
+                for field in (
+                    "seed_entity_count",
+                    "seed_assertion_count",
+                    "seed_event_count",
+                    "linked_assertion_count",
+                    "linked_event_count",
+                    "linked_effect_count",
+                )
+            },
+            "mean_graph_nodes": sum(
+                int(item.get("graph_node_count") or 0) for item in evolink_runs
+            )
+            / evolink_query_count,
+            "mean_graph_edges": sum(
+                int(item.get("graph_edge_count") or 0) for item in evolink_runs
+            )
+            / evolink_query_count,
+        }
+    return diagnostics
 
 
 def agentic_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -964,6 +1553,90 @@ def agentic_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             sum(bool(item.get("insufficient_evidence")) for item in rows if not item.get("error"))
             / count
         ),
+    }
+
+
+def evoneed_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate typed gaps, selected routes, and need closure from trajectories."""
+    route_action_counts = {route: 0 for route in ("vector", "graph", "event")}
+    route_query_counts = {route: 0 for route in route_action_counts}
+    knowledge_type_counts = {
+        kind: 0
+        for kind in (
+            "text_evidence",
+            "relation_evidence",
+            "evolution_evidence",
+        )
+    }
+    query_count = 0
+    initial_open_total = 0
+    final_open_total = 0
+    sufficient_count = 0
+    for row in rows:
+        trajectory = row.get("trajectory")
+        if row.get("error") or not isinstance(trajectory, dict):
+            continue
+        events = trajectory.get("events") or []
+        initial_state = next(
+            (
+                item.get("need_state")
+                for item in events
+                if item.get("node") == "plan_needs"
+            ),
+            {},
+        )
+        final_state = next(
+            (
+                item.get("final_need_state")
+                for item in reversed(events)
+                if item.get("node") == "answer"
+            ),
+            {},
+        )
+        if not isinstance(initial_state, dict) or not isinstance(final_state, dict):
+            continue
+        query_count += 1
+        initial_needs = initial_state.get("needs") or []
+        final_needs = final_state.get("needs") or []
+        initial_open_total += sum(
+            item.get("status") != "satisfied" for item in initial_needs
+        )
+        final_open_total += sum(
+            item.get("status") != "satisfied" for item in final_needs
+        )
+        sufficient_count += bool(final_state.get("sufficient"))
+        for item in initial_needs:
+            kind = item.get("knowledge_type")
+            if kind in knowledge_type_counts:
+                knowledge_type_counts[kind] += 1
+        routes_in_query: set[str] = set()
+        for event in events:
+            if event.get("node") != "retrieve_needs":
+                continue
+            for action in event.get("actions") or []:
+                route = action.get("route")
+                if route in route_action_counts:
+                    route_action_counts[route] += 1
+                    routes_in_query.add(route)
+        for route in routes_in_query:
+            route_query_counts[route] += 1
+    if not query_count:
+        return {}
+    return {
+        "query_count": query_count,
+        "initial_knowledge_type_counts": knowledge_type_counts,
+        "route_action_counts": route_action_counts,
+        "route_query_rates": {
+            route: count / query_count for route, count in route_query_counts.items()
+        },
+        "mean_route_actions": sum(route_action_counts.values()) / query_count,
+        "need_closure_rate": (
+            max(0, initial_open_total - final_open_total) / initial_open_total
+            if initial_open_total
+            else 0.0
+        ),
+        "final_open_need_count": final_open_total,
+        "sufficient_rate": sufficient_count / query_count,
     }
 
 

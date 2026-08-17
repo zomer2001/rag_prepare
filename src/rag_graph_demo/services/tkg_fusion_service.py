@@ -115,12 +115,23 @@ class TKGFusionService:
         semantic: SemanticExtractionBatch,
         events: list[EventRecord],
     ) -> TKGIndexResult:
+        # Lifecycle effects must be applied in effective-time order. Source text can
+        # mention a future recurrence before an earlier termination (for example,
+        # daylight-saving changes), which would otherwise create an inverted interval.
+        ordered_events = sorted(
+            events,
+            key=lambda item: (
+                item.start_time or item.end_time or "9999-12-31",
+                item.created_at,
+                item.event_id,
+            ),
+        )
         proposals: dict[str, EntityResolutionProposal] = {}
         resolution_candidates = list(semantic.entities)
         if self._entity_resolver is not None:
             snapshot = await self._registry.snapshot()
             resolution_candidates.extend(
-                self._event_resolution_candidates(snapshot, semantic, events)
+                self._event_resolution_candidates(snapshot, semantic, ordered_events)
             )
             resolved = await self._entity_resolver.resolve_batch(
                 snapshot, resolution_candidates
@@ -172,7 +183,7 @@ class TKGFusionService:
                 )
             link_count = 0
             effect_count = 0
-            for event in events:
+            for event in ordered_events:
                 for role, values in (("actor", event.actors), ("object", event.objects)):
                     for value in values:
                         entity = self._resolve_name(
@@ -241,12 +252,14 @@ class TKGFusionService:
         snapshot = await self._registry.snapshot()
         events = []
         mentions = []
+        relations = []
         if self._event_registry is not None:
-            events, mentions, _, _ = await self._event_registry.snapshot()
+            events, mentions, relations, _ = await self._event_registry.snapshot()
         await self._neo4j_store.replace_snapshot(
             snapshot,
             events=events,
             event_mentions=mentions,
+            event_relations=relations,
         )
 
     @staticmethod
@@ -694,6 +707,34 @@ class TKGFusionService:
             reason=reason or event.summary,
         )
         snapshot.event_effects.append(effect)
+        # Keep the in-memory lifecycle current while multiple events from the same
+        # document are fused in one transaction. The registry recomputes the same
+        # state from provenance before persistence.
+        if stance != MentionStance.UNCERTAIN:
+            if effect_type in {
+                EventEffectType.CREATES,
+                EventEffectType.CONFIRMS,
+                EventEffectType.UPDATES,
+            }:
+                assertion.status = AssertionStatus.ACTIVE
+                if (
+                    assertion.stated_valid_to is None
+                    and assertion.valid_to
+                    and effect.effective_time
+                    and effect.effective_time > assertion.valid_to
+                ):
+                    assertion.valid_to = None
+                    assertion.invalidated_at = None
+            elif effect_type == EventEffectType.DENIES:
+                assertion.status = AssertionStatus.DISPUTED
+            elif effect_type == EventEffectType.TERMINATES:
+                assertion.status = AssertionStatus.INACTIVE
+                assertion.valid_to = effect.effective_time
+                assertion.invalidated_at = effect.created_at
+            elif effect_type == EventEffectType.SUPERSEDES:
+                assertion.status = AssertionStatus.SUPERSEDED
+                assertion.valid_to = effect.effective_time
+                assertion.invalidated_at = effect.created_at
         return 1
 
     @staticmethod

@@ -99,13 +99,18 @@ async def _check_neo4j() -> dict[str, Any]:
     try:
         await driver.verify_connectivity()
         async with driver.session(database=settings.neo4j_database) as session:
-            result = await session.run("MATCH (n:RagTKG) RETURN count(n) AS nodes")
+            result = await session.run(
+                "MATCH (n:RagTKG {workspace_id: $workspace_id}) "
+                "RETURN count(n) AS nodes",
+                workspace_id=settings.neo4j_workspace,
+            )
             row = await result.single()
         return {
             "ok": True,
             "enabled": True,
             "uri": settings.neo4j_uri,
             "database": settings.neo4j_database,
+            "workspace_id": settings.neo4j_workspace,
             "nodes": row["nodes"],
         }
     except Exception as exc:

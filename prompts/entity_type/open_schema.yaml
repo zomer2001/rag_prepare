@@ -1,0 +1,32 @@
+entity_types_guidance: |-
+  Extract only stable, named retrieval anchors and explicit factual relationships needed
+  to answer questions about this passage. This mode does not use a fixed ontology.
+
+  Entity rules:
+  - Use a concise, reusable type label that describes the object, such as Person,
+    Organization, Location, Product, Work, Role, LegalCase, Team, Award, Technology,
+    Dataset or Method. Existing examples are guidance, not a closed type list.
+  - Do not turn dates, amounts, actions, sentences or broad topics into entities.
+  - Use the most explicit canonical name in the passage and keep stated abbreviations or
+    alternate names in aliases.
+  - Events are extracted separately; retain their stable participants and objects here,
+    but do not create an entity for the occurrence itself.
+
+  Relationship rules:
+  - Extract only relations explicitly stated in the passage.
+  - Use a short reusable predicate phrase rather than a whole sentence.
+  - Do not emit generic co-occurrence relations such as related_to or mentioned_with.
+  - Both endpoints must appear in the entity list for the same segment.
+  - Return at most 4 entities and 4 relationships, ordered by retrieval importance.
+
+entity_extraction_json_examples:
+  - |-
+    {
+      "entities": [
+        {"name": "Epic Games", "type": "Organization", "description": "A game company in the legal case."},
+        {"name": "Google", "type": "Organization", "description": "The company accused in the case."}
+      ],
+      "relationships": [
+        {"source": "Epic Games", "target": "Google", "predicate": "sued", "description": "Epic Games sued Google.", "confidence": 0.95}
+      ]
+    }

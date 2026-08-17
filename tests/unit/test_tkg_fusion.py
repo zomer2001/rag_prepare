@@ -286,3 +286,56 @@ async def test_recreated_fact_starts_new_assertion_after_termination(tmp_path) -
     assert facts[0].valid_to == "2026-03-01"
     assert facts[1].status == AssertionStatus.ACTIVE
     assert facts[1].valid_from == "2027-01-01"
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_events_are_applied_in_effective_time_order(tmp_path) -> None:
+    registry, service = build_service(tmp_path)
+    events = [
+        EventRecord(
+            event_id="evt-restart",
+            canonical_key="restart",
+            event_type="开始",
+            summary="The state starts again in 2024.",
+            start_time="2024-03-31",
+            fact_effects=[
+                EventFactCandidate(
+                    subject="Clock",
+                    predicate="changesTo",
+                    object="Daylight time",
+                    effect_type=EventEffectType.CREATES,
+                )
+            ],
+        ),
+        EventRecord(
+            event_id="evt-stop",
+            canonical_key="stop",
+            event_type="结束",
+            summary="The previous state ended in 2023.",
+            start_time="2023-10-29T02:00",
+            fact_effects=[
+                EventFactCandidate(
+                    subject="Clock",
+                    predicate="changesTo",
+                    object="Daylight time",
+                    effect_type=EventEffectType.TERMINATES,
+                )
+            ],
+        ),
+    ]
+
+    await service.index_document(
+        "doc-clock",
+        "Clock changes",
+        SemanticExtractionBatch(),
+        events,
+    )
+    snapshot = await registry.snapshot()
+    facts = sorted(snapshot.assertions, key=lambda item: item.valid_from or "")
+
+    assert len(facts) == 2
+    assert facts[0].valid_from == facts[0].valid_to == "2023-10-29T02:00"
+    assert facts[0].status == AssertionStatus.INACTIVE
+    assert facts[1].valid_from == "2024-03-31"
+    assert facts[1].valid_to is None
+    assert facts[1].status == AssertionStatus.ACTIVE

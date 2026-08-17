@@ -11,11 +11,21 @@ from rag_graph_demo.ingestion.source_mapper import SourceMapper
 from rag_graph_demo.lightrag_engine import engine as engine_module
 from rag_graph_demo.lightrag_engine.engine import (
     LightRAGEngine,
+    _bounded_relationship_predicate,
     limit_controlled_extraction_result,
     rewrite_reference_titles,
     select_answer_citations,
 )
 from rag_graph_demo.storage.document_registry import DocumentRegistry
+
+
+def test_bounded_relationship_predicate_caps_accumulated_keyword_bag() -> None:
+    value = "borrowing," + ",".join(f"financial-link-{index}" for index in range(30))
+
+    result = _bounded_relationship_predicate(value)
+
+    assert len(result) == 200
+    assert result.startswith("borrowing,")
 
 
 class InitializableFakeRag:

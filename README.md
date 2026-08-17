@@ -31,6 +31,9 @@
 - 图谱可视化及同一问题的多模式横向比较。
 - FastAPI、Streamlit、批量导入、全量重建、诊断和 Smoke Test。
 - 统一 Query Planner，以及文本向量、语义图谱、事件向量三路可回溯证据融合。
+- `ours_evolink`查询级协同图：三路结果作为Neo4j种子，返回实体—断言—事件及其来源证据链。
+- `agentic_ours_evolink`通用多轮改写基线，以及`ours_evoneed`免训练知识需求规划：显式诊断
+  缺少原文、关系还是演化证据，只执行对应通路并通过EvoLink回到来源证据。
 - 事件抽取、跨文档合并、来源段绑定、时间线、立场冲突检测和事件增强问答。
 - 静态领域本体（OWL/SHACL）及声明级 TKG：统一 Entity ID，保留 Entity/Assertion/Event
   Mention、来源立场、事实有效期、冲突和事件作用轨迹。
@@ -121,6 +124,41 @@ uv run streamlit run src/rag_graph_demo/ui/streamlit_app.py \
 逐步扩展到几十篇。
 
 ## 常用命令
+
+### 课题驱动的自动采集
+
+`osint` 命令可以从一个课题 YAML 出发，扫描配置的 RSS、Sitemap、种子 URL 和可选
+JSON 搜索 API，抓取 canonical 原文后，再从已抓材料提取下一轮检索词。整个过程单进程
+执行，默认最多两轮；原件、版本、去重和质量校验继续使用 Collection 管线。
+
+先查看或生成课题计划：
+
+```bash
+uv run python -m rag_graph_demo.osint.cli \
+  --topic config/topics/counter_uas.yaml \
+  plan
+```
+
+允许联网并执行一轮：
+
+```bash
+uv run python -m rag_graph_demo.osint.cli \
+  --topic config/topics/counter_uas.yaml \
+  run --live --rounds 1
+```
+
+查看可恢复状态：
+
+```bash
+uv run python -m rag_graph_demo.osint.cli \
+  --topic config/topics/counter_uas.yaml \
+  status
+```
+
+课题状态保存在 `data/osint/<topic_id>/state.json`，规范化正文仍写入
+`data/collection/`。如果配置了 `DEEPSEEK_API_KEY`，系统会用 LLM 规划和抽取扩张词；
+否则自动回退到关键词、专有名词、缩写和编号抽取。搜索 API 使用
+`SearchApiConfig` 的可配置 JSON 字段路径，搜索摘要只做候选发现，不作为正文。
 
 检查基础环境：
 

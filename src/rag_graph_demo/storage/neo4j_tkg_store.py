@@ -10,6 +10,8 @@ from rag_graph_demo.domain.tkg import (
     ConflictCase,
     EntityRecord,
     EventEffect,
+    TKGExpansionRequest,
+    TKGExpansionResponse,
     TKGQueryRequest,
     TKGQueryResponse,
     TKGSnapshot,
@@ -39,10 +41,12 @@ class Neo4jTKGStore:
         password: str,
         *,
         database: str = "neo4j",
+        workspace_id: str = "default",
         driver: AsyncDriver | None = None,
     ) -> None:
         self._driver = driver or AsyncGraphDatabase.driver(uri, auth=(user, password))
         self._database = database
+        self._workspace_id = workspace_id
 
     async def close(self) -> None:
         await self._driver.close()
@@ -50,47 +54,84 @@ class Neo4jTKGStore:
     async def verify(self) -> dict[str, Any]:
         await self._driver.verify_connectivity()
         async with self._driver.session(database=self._database) as session:
-            record = await session.run("MATCH (n:RagTKG) RETURN count(n) AS nodes")
+            record = await session.run(
+                "MATCH (n:RagTKG {workspace_id: $workspace_id}) RETURN count(n) AS nodes",
+                workspace_id=self._workspace_id,
+            )
             row = await record.single()
-        return {"ok": True, "database": self._database, "nodes": row["nodes"]}
+        return {
+            "ok": True,
+            "database": self._database,
+            "workspace_id": self._workspace_id,
+            "nodes": row["nodes"],
+        }
 
     async def initialize_schema(self) -> None:
-        statements = (
-            "CREATE CONSTRAINT tkg_entity_id IF NOT EXISTS "
-            "FOR (n:RagTKGEntity) REQUIRE n.entity_id IS UNIQUE",
-            "CREATE CONSTRAINT tkg_assertion_id IF NOT EXISTS "
-            "FOR (n:RagTKGAssertion) REQUIRE n.assertion_id IS UNIQUE",
-            "CREATE CONSTRAINT tkg_event_id IF NOT EXISTS "
-            "FOR (n:RagTKGEvent) REQUIRE n.event_id IS UNIQUE",
-            "CREATE CONSTRAINT tkg_mention_id IF NOT EXISTS "
-            "FOR (n:RagTKGMention) REQUIRE n.mention_id IS UNIQUE",
-            "CREATE CONSTRAINT tkg_effect_id IF NOT EXISTS "
-            "FOR (n:RagTKGEffect) REQUIRE n.effect_id IS UNIQUE",
-            "CREATE CONSTRAINT tkg_conflict_id IF NOT EXISTS "
-            "FOR (n:RagTKGConflict) REQUIRE n.conflict_id IS UNIQUE",
-            "CREATE CONSTRAINT tkg_decision_id IF NOT EXISTS "
-            "FOR (n:RagTKGDecision) REQUIRE n.decision_id IS UNIQUE",
-            "CREATE CONSTRAINT tkg_review_id IF NOT EXISTS "
-            "FOR (n:RagTKGReview) REQUIRE n.review_id IS UNIQUE",
-            "CREATE CONSTRAINT tkg_merge_id IF NOT EXISTS "
-            "FOR (n:RagTKGMerge) REQUIRE n.merge_id IS UNIQUE",
+        legacy_constraints = (
+            "tkg_entity_id",
+            "tkg_assertion_id",
+            "tkg_event_id",
+            "tkg_mention_id",
+            "tkg_effect_id",
+            "tkg_conflict_id",
+            "tkg_decision_id",
+            "tkg_review_id",
+            "tkg_merge_id",
+        )
+        constraints = (
+            ("entity", "RagTKGEntity", "entity_id"),
+            ("assertion", "RagTKGAssertion", "assertion_id"),
+            ("event", "RagTKGEvent", "event_id"),
+            ("predicate", "RagTKGPredicate", "predicate_id"),
+            ("document", "RagTKGDocument", "document_id"),
+            ("mention", "RagTKGMention", "mention_id"),
+            ("effect", "RagTKGEffect", "effect_id"),
+            ("conflict", "RagTKGConflict", "conflict_id"),
+        )
+        indexes = (
             "CREATE FULLTEXT INDEX tkg_entity_names IF NOT EXISTS "
             "FOR (n:RagTKGEntity) ON EACH [n.canonical_name, n.alias_text]",
         )
         async with self._driver.session(database=self._database) as session:
-            for statement in statements:
+            # Audit records may intentionally repeat after resumable snapshot imports.
+            # Do not force uniqueness on them; provenance must never be deleted merely
+            # to make a migration pass.
+            for name in (
+                "tkg_decision_workspace_id",
+                "tkg_review_workspace_id",
+                "tkg_merge_workspace_id",
+            ):
+                await session.run(f"DROP CONSTRAINT {name} IF EXISTS")
+            # Existing installations predate workspaces. Assign them to the default
+            # workspace before replacing global-ID uniqueness with scoped uniqueness.
+            await session.run(
+                "MATCH (n:RagTKG) WHERE n.workspace_id IS NULL "
+                "SET n.workspace_id = 'default'"
+            )
+            for name in legacy_constraints:
+                await session.run(f"DROP CONSTRAINT {name} IF EXISTS")
+            for name, label, property_name in constraints:
+                await session.run(
+                    f"CREATE CONSTRAINT tkg_{name}_workspace_id IF NOT EXISTS "
+                    f"FOR (n:{label}) REQUIRE (n.workspace_id, n.{property_name}) IS UNIQUE"
+                )
+            for statement in indexes:
                 await session.run(statement)
             # Create then remove schema tokens so optional properties/relationships
             # do not produce first-query warnings on an otherwise empty database.
             await session.run(
                 """
                 CREATE (a:RagTKG:RagTKGAssertion {
+                  workspace_id: $workspace_id,
                   assertion_id: '__schema_probe__', valid_from: null, valid_to: null
                 })
-                CREATE (c:RagTKG:RagTKGConflict {conflict_id: '__schema_probe__'})
+                CREATE (c:RagTKG:RagTKGConflict {
+                  workspace_id: $workspace_id, conflict_id: '__schema_probe__'
+                })
                 CREATE (c)-[:INVOLVES]->(a)
                 WITH a, c DETACH DELETE a, c
-                """
+                """,
+                workspace_id=self._workspace_id,
             )
 
     async def replace_snapshot(
@@ -99,15 +140,38 @@ class Neo4jTKGStore:
         *,
         events: list[Any] | None = None,
         event_mentions: list[Any] | None = None,
+        event_relations: list[Any] | None = None,
     ) -> None:
         event_by_id = {item.event_id: item for item in events or []}
-        payload = self._payload(snapshot, event_by_id, event_mentions or [])
+        payload = self._payload(
+            snapshot,
+            event_by_id,
+            event_mentions or [],
+            event_relations or [],
+        )
         async with self._driver.session(database=self._database) as session:
-            await session.execute_write(self._replace_tx, payload)
+            await session.execute_write(
+                self._replace_tx,
+                payload,
+                self._workspace_id,
+            )
 
     @staticmethod
-    async def _replace_tx(tx: Any, payload: dict[str, Any]) -> None:
-        await tx.run("MATCH (n:RagTKG) DETACH DELETE n")
+    async def _replace_tx(
+        tx: Any,
+        payload: dict[str, Any],
+        workspace_id: str,
+    ) -> None:
+        await tx.run(
+            "MATCH (n:RagTKG {workspace_id: $workspace_id}) DETACH DELETE n",
+            workspace_id=workspace_id,
+        )
+        for rows in payload.values():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                target = row.get("props", row)
+                target["workspace_id"] = workspace_id
         await tx.run(
             """
             UNWIND $rows AS row
@@ -125,12 +189,31 @@ class Neo4jTKGStore:
             SET n = row.props, n.mention_ids = row.mention_ids,
                 n.event_effect_ids = row.event_effect_ids
             WITH n, row
-            MATCH (s:RagTKGEntity {entity_id: row.subject_id})
-            MATCH (o:RagTKGEntity {entity_id: row.object_id})
+            MATCH (s:RagTKGEntity {workspace_id: $workspace_id, entity_id: row.subject_id})
+            MATCH (o:RagTKGEntity {workspace_id: $workspace_id, entity_id: row.object_id})
             CREATE (n)-[:SUBJECT]->(s)
             CREATE (n)-[:OBJECT]->(o)
             """,
             rows=payload["assertions"],
+            workspace_id=workspace_id,
+        )
+        await tx.run(
+            """
+            UNWIND $rows AS row
+            CREATE (n:RagTKG:RagTKGPredicate)
+            SET n = row
+            """,
+            rows=payload["predicates"],
+        )
+        await tx.run(
+            """
+            MATCH (a:RagTKGAssertion {workspace_id: $workspace_id})
+            MATCH (p:RagTKGPredicate {
+              workspace_id: $workspace_id, predicate_id: a.predicate_id
+            })
+            CREATE (a)-[:PREDICATE]->(p)
+            """,
+            workspace_id=workspace_id,
         )
         await tx.run(
             """
@@ -140,6 +223,25 @@ class Neo4jTKGStore:
                 n.source_document_ids = row.source_document_ids
             """,
             rows=payload["events"],
+        )
+        await tx.run(
+            """
+            UNWIND $rows AS row
+            MATCH (source:RagTKGEvent {
+              workspace_id: $workspace_id, event_id: row.source_event_id
+            })
+            MATCH (target:RagTKGEvent {
+              workspace_id: $workspace_id, event_id: row.target_event_id
+            })
+            CREATE (source)-[:RELATED_EVENT {
+              relation_id: row.relation_id,
+              relation_type: row.relation_type,
+              confidence: row.confidence,
+              shared_entities: row.shared_entities
+            }]->(target)
+            """,
+            rows=payload["event_relations"],
+            workspace_id=workspace_id,
         )
         await tx.run(
             """
@@ -155,10 +257,18 @@ class Neo4jTKGStore:
             CREATE (n:RagTKG:RagTKGMention)
             SET n = row.props
             WITH n, row
-            OPTIONAL MATCH (e:RagTKGEntity {entity_id: row.entity_id})
-            OPTIONAL MATCH (a:RagTKGAssertion {assertion_id: row.assertion_id})
-            OPTIONAL MATCH (v:RagTKGEvent {event_id: row.event_id})
-            OPTIONAL MATCH (d:RagTKGDocument {document_id: row.document_id})
+            OPTIONAL MATCH (e:RagTKGEntity {
+              workspace_id: $workspace_id, entity_id: row.entity_id
+            })
+            OPTIONAL MATCH (a:RagTKGAssertion {
+              workspace_id: $workspace_id, assertion_id: row.assertion_id
+            })
+            OPTIONAL MATCH (v:RagTKGEvent {
+              workspace_id: $workspace_id, event_id: row.event_id
+            })
+            OPTIONAL MATCH (d:RagTKGDocument {
+              workspace_id: $workspace_id, document_id: row.document_id
+            })
             FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END | CREATE (n)-[:MENTIONS]->(e))
             FOREACH (_ IN CASE WHEN a IS NULL THEN [] ELSE [1] END | CREATE (n)-[:SUPPORTS]->(a))
             FOREACH (_ IN CASE WHEN v IS NULL THEN [] ELSE [1] END |
@@ -167,18 +277,24 @@ class Neo4jTKGStore:
               CREATE (n)-[:FROM_DOCUMENT]->(d))
             """,
             rows=payload["mentions"],
+            workspace_id=workspace_id,
         )
         await tx.run(
             """
             UNWIND $rows AS row
-            MATCH (v:RagTKGEvent {event_id: row.event_id})
-            MATCH (e:RagTKGEntity {entity_id: row.entity_id})
+            MATCH (v:RagTKGEvent {
+              workspace_id: $workspace_id, event_id: row.event_id
+            })
+            MATCH (e:RagTKGEntity {
+              workspace_id: $workspace_id, entity_id: row.entity_id
+            })
             CREATE (v)-[:HAS_PARTICIPANT {
               link_id: row.link_id, role: row.role, surface_form: row.surface_form,
               document_id: row.document_id
             }]->(e)
             """,
             rows=payload["event_links"],
+            workspace_id=workspace_id,
         )
         await tx.run(
             """
@@ -186,12 +302,17 @@ class Neo4jTKGStore:
             CREATE (n:RagTKG:RagTKGEffect)
             SET n = row.props
             WITH n, row
-            MERGE (v:RagTKG:RagTKGEvent {event_id: row.event_id})
+            MERGE (v:RagTKG:RagTKGEvent {
+              workspace_id: $workspace_id, event_id: row.event_id
+            })
             WITH n, row, v
-            MATCH (a:RagTKGAssertion {assertion_id: row.assertion_id})
+            MATCH (a:RagTKGAssertion {
+              workspace_id: $workspace_id, assertion_id: row.assertion_id
+            })
             CREATE (v)-[:HAS_EFFECT]->(n)-[:AFFECTS]->(a)
             """,
             rows=payload["effects"],
+            workspace_id=workspace_id,
         )
         await tx.run(
             """
@@ -201,10 +322,13 @@ class Neo4jTKGStore:
                 n.mention_ids = row.mention_ids
             WITH n, row
             UNWIND row.assertion_ids AS assertion_id
-            MATCH (a:RagTKGAssertion {assertion_id: assertion_id})
+            MATCH (a:RagTKGAssertion {
+              workspace_id: $workspace_id, assertion_id: assertion_id
+            })
             CREATE (n)-[:INVOLVES]->(a)
             """,
             rows=payload["conflicts"],
+            workspace_id=workspace_id,
         )
         await tx.run(
             """
@@ -212,10 +336,13 @@ class Neo4jTKGStore:
             CREATE (n:RagTKG:RagTKGDecision)
             SET n = row.props, n.candidate_entity_ids = row.candidate_entity_ids
             WITH n, row
-            OPTIONAL MATCH (e:RagTKGEntity {entity_id: row.selected_entity_id})
+            OPTIONAL MATCH (e:RagTKGEntity {
+              workspace_id: $workspace_id, entity_id: row.selected_entity_id
+            })
             FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END | CREATE (n)-[:SELECTED]->(e))
             """,
             rows=payload["decisions"],
+            workspace_id=workspace_id,
         )
         await tx.run(
             """
@@ -224,10 +351,13 @@ class Neo4jTKGStore:
             SET n = row.props, n.candidate_entity_ids = row.candidate_entity_ids,
                 n.candidate_scores_json = row.candidate_scores_json
             WITH n, row
-            OPTIONAL MATCH (e:RagTKGEntity {entity_id: row.provisional_entity_id})
+            OPTIONAL MATCH (e:RagTKGEntity {
+              workspace_id: $workspace_id, entity_id: row.provisional_entity_id
+            })
             FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END | CREATE (n)-[:PROVISIONAL]->(e))
             """,
             rows=payload["reviews"],
+            workspace_id=workspace_id,
         )
         await tx.run(
             """
@@ -235,12 +365,17 @@ class Neo4jTKGStore:
             CREATE (n:RagTKG:RagTKGMerge)
             SET n = row.props
             WITH n, row
-            OPTIONAL MATCH (s:RagTKGEntity {entity_id: row.source_entity_id})
-            OPTIONAL MATCH (t:RagTKGEntity {entity_id: row.target_entity_id})
+            OPTIONAL MATCH (s:RagTKGEntity {
+              workspace_id: $workspace_id, entity_id: row.source_entity_id
+            })
+            OPTIONAL MATCH (t:RagTKGEntity {
+              workspace_id: $workspace_id, entity_id: row.target_entity_id
+            })
             FOREACH (_ IN CASE WHEN s IS NULL THEN [] ELSE [1] END | CREATE (n)-[:SOURCE]->(s))
             FOREACH (_ IN CASE WHEN t IS NULL THEN [] ELSE [1] END | CREATE (n)-[:TARGET]->(t))
             """,
             rows=payload["merges"],
+            workspace_id=workspace_id,
         )
 
     async def query(self, request: TKGQueryRequest) -> TKGQueryResponse:
@@ -262,7 +397,7 @@ class Neo4jTKGStore:
                 "WHERE toLower(alias) = toLower($entity_name)))"
             )
         query = f"""
-        MATCH (a:RagTKGAssertion)-[:SUBJECT]->(s:RagTKGEntity)
+        MATCH (a:RagTKGAssertion {{workspace_id: $workspace_id}})-[:SUBJECT]->(s:RagTKGEntity)
         MATCH (a)-[:OBJECT]->(o:RagTKGEntity)
         WHERE {' AND '.join(conditions)}
         WITH a, s, o ORDER BY coalesce(a.valid_from, '') DESC LIMIT $limit
@@ -275,7 +410,10 @@ class Neo4jTKGStore:
                collect(DISTINCT properties(ef)) AS effects,
                collect(DISTINCT properties(c)) AS conflicts
         """
-        parameters = request.model_dump(mode="json")
+        parameters = {
+            **request.model_dump(mode="json"),
+            "workspace_id": self._workspace_id,
+        }
         async with self._driver.session(database=self._database) as session:
             result = await session.run(query, **parameters)
             row = await result.single()
@@ -321,7 +459,10 @@ class Neo4jTKGStore:
         limit: int = 200,
     ) -> dict[str, list[dict[str, Any]]]:
         where = ""
-        parameters: dict[str, Any] = {"limit": limit}
+        parameters: dict[str, Any] = {
+            "limit": limit,
+            "workspace_id": self._workspace_id,
+        }
         if entity_name:
             where = (
                 "WHERE toLower(e.canonical_name) CONTAINS toLower($entity_name) "
@@ -329,7 +470,7 @@ class Neo4jTKGStore:
             )
             parameters["entity_name"] = entity_name
         query = f"""
-        MATCH (e:RagTKGEntity)
+        MATCH (e:RagTKGEntity {{workspace_id: $workspace_id}})
         {where}
         OPTIONAL MATCH (a:RagTKGAssertion)-[:SUBJECT|OBJECT]->(e)
         OPTIONAL MATCH (a)-[:SUBJECT]->(s:RagTKGEntity)
@@ -378,11 +519,146 @@ class Neo4jTKGStore:
             )
         return {"nodes": nodes[:limit], "edges": edges[: limit * 2]}
 
+    async def expand(self, request: TKGExpansionRequest) -> TKGExpansionResponse:
+        """Expand vector seeds through approved TKG paths and return source evidence."""
+        parameters = {
+            **request.model_dump(mode="json"),
+            "workspace_id": self._workspace_id,
+        }
+        query = """
+        MATCH (a:RagTKGAssertion {workspace_id: $workspace_id})
+        WHERE (
+          a.assertion_id IN $assertion_ids OR a.predicate_id IN $predicate_ids OR
+          EXISTS {
+            MATCH (a)-[:SUBJECT|OBJECT]->(seed:RagTKGEntity)
+            WHERE seed.entity_id IN $entity_ids
+          } OR EXISTS {
+            MATCH (seed_event:RagTKGEvent)-[:HAS_EFFECT]->(:RagTKGEffect)-[:AFFECTS]->(a)
+            WHERE seed_event.workspace_id = $workspace_id
+              AND seed_event.event_id IN $event_ids
+          }
+        )
+        AND ($include_inactive OR NOT a.status IN ['inactive','superseded','retracted'])
+        AND ($include_disputed OR a.status <> 'disputed')
+        AND ($start_time IS NULL OR a.valid_to = '' OR a.valid_to >= $start_time)
+        AND ($end_time IS NULL OR a.valid_from = '' OR a.valid_from <= $end_time)
+        MATCH (a)-[:SUBJECT]->(s:RagTKGEntity)
+        MATCH (a)-[:OBJECT]->(o:RagTKGEntity)
+        WITH DISTINCT a, s, o,
+             coalesce($assertion_scores[a.assertion_id], 0.0) * 0.45 +
+             coalesce($predicate_scores[a.predicate_id], 0.0) * 0.20 +
+             CASE WHEN coalesce($entity_scores[s.entity_id], 0.0) >=
+                            coalesce($entity_scores[o.entity_id], 0.0)
+                  THEN coalesce($entity_scores[s.entity_id], 0.0)
+                  ELSE coalesce($entity_scores[o.entity_id], 0.0) END * 0.20 +
+             CASE WHEN coalesce($entity_scores[s.entity_id], 0.0) > 0 AND
+                            coalesce($entity_scores[o.entity_id], 0.0) > 0
+                  THEN 0.15 ELSE 0 END AS seed_score
+        ORDER BY CASE WHEN $rank_by_seed_score THEN seed_score ELSE 0.0 END DESC
+        LIMIT $limit
+        OPTIONAL MATCH (m:RagTKGMention)-[:SUPPORTS]->(a)
+        OPTIONAL MATCH (v:RagTKGEvent)-[:HAS_EFFECT]->(ef:RagTKGEffect)-[:AFFECTS]->(a)
+        OPTIONAL MATCH (c:RagTKGConflict)-[:INVOLVES]->(a)
+        RETURN collect(DISTINCT properties(a)) AS assertions,
+               collect(DISTINCT properties(s)) + collect(DISTINCT properties(o)) AS entities,
+               collect(DISTINCT properties(m)) AS mentions,
+               collect(DISTINCT properties(v)) AS events,
+               collect(DISTINCT properties(ef)) AS effects,
+               collect(DISTINCT properties(c)) AS conflicts
+        """
+        event_query = """
+        MATCH (v:RagTKGEvent {workspace_id: $workspace_id})
+        WHERE v.event_id IN $event_ids OR EXISTS {
+          MATCH (v)-[:HAS_PARTICIPANT]->(e:RagTKGEntity)
+          WHERE e.entity_id IN $entity_ids
+        }
+        WITH DISTINCT v
+        OPTIONAL MATCH (v)-[r:RELATED_EVENT]-(linked:RagTKGEvent)
+        WITH collect(DISTINCT v) + CASE WHEN $expand_event_chain
+             THEN collect(DISTINCT linked) ELSE [] END AS values
+        UNWIND values AS event
+        WITH DISTINCT event WHERE event IS NOT NULL
+        WITH event, coalesce($event_scores[event.event_id], 0.0) AS seed_score
+        ORDER BY CASE WHEN $rank_by_seed_score THEN seed_score ELSE 0.0 END DESC
+        LIMIT $limit
+        OPTIONAL MATCH (em:RagTKGMention)-[:MENTIONS_EVENT]->(event)
+        OPTIONAL MATCH (event)-[participant:HAS_PARTICIPANT]->(entity:RagTKGEntity)
+        RETURN collect(DISTINCT properties(event)) AS events,
+               collect(DISTINCT properties(em)) AS event_mentions,
+               collect(DISTINCT CASE WHEN participant IS NULL THEN null ELSE {
+                 event_id: event.event_id,
+                 entity_id: entity.entity_id,
+                 role: participant.role,
+                 surface_form: participant.surface_form,
+                 document_id: participant.document_id
+               } END) AS event_links
+        """
+        async with self._driver.session(database=self._database) as session:
+            result = await session.run(query, **parameters)
+            row = await result.single()
+            event_result = await session.run(event_query, **parameters)
+            event_row = await event_result.single()
+        row = row or {}
+        event_row = event_row or {}
+        entities = {
+            item["entity_id"]: EntityRecord.model_validate(item)
+            for item in row.get("entities", []) or []
+            if item and item.get("entity_id")
+        }
+        assertions = [
+            AssertionRecord.model_validate(item)
+            for item in row.get("assertions", []) or []
+            if item and item.get("assertion_id")
+        ]
+        mentions = [
+            AssertionMention.model_validate(item)
+            for item in row.get("mentions", []) or []
+            if item and item.get("assertion_id")
+        ]
+        effects = [
+            EventEffect.model_validate(item)
+            for item in row.get("effects", []) or []
+            if item and item.get("effect_id")
+        ]
+        conflicts = [
+            ConflictCase.model_validate(item)
+            for item in row.get("conflicts", []) or []
+            if item and item.get("conflict_id")
+        ]
+        events = {
+            item["event_id"]: item
+            for item in [
+                *(row.get("events", []) or []),
+                *(event_row.get("events", []) or []),
+            ]
+            if item and item.get("event_id")
+        }
+        event_mentions = {
+            item["mention_id"]: item
+            for item in event_row.get("event_mentions", []) or []
+            if item and item.get("mention_id")
+        }
+        return TKGExpansionResponse(
+            entities=list(entities.values()),
+            assertions=assertions,
+            mentions=mentions,
+            events=list(events.values()),
+            event_mentions=list(event_mentions.values()),
+            event_links=[
+                item
+                for item in event_row.get("event_links", []) or []
+                if item and item.get("event_id") and item.get("entity_id")
+            ],
+            effects=effects,
+            conflicts=conflicts,
+        )
+
     @staticmethod
     def _payload(
         snapshot: TKGSnapshot,
         events: dict[str, Any],
         event_mentions: list[Any],
+        event_relations: list[Any],
     ) -> dict[str, Any]:
         import json
 
@@ -425,6 +701,18 @@ class Neo4jTKGStore:
                     "event_effect_ids": item.event_effect_ids,
                 }
                 for item in snapshot.assertions
+            ],
+            "predicates": [
+                {
+                    "workspace_id": "",
+                    "predicate_id": predicate_id,
+                    "canonical_name": predicate_id,
+                    "description": "",
+                    "ontology_version": snapshot.ontology_version,
+                }
+                for predicate_id in sorted(
+                    {item.predicate_id for item in snapshot.assertions}
+                )
             ],
             "events": [
                 {
@@ -476,6 +764,11 @@ class Neo4jTKGStore:
                 if item.event_id in events
             ],
             "event_links": [item.model_dump(mode="json") for item in snapshot.event_entity_links],
+            "event_relations": [
+                item.model_dump(mode="json")
+                for item in event_relations
+                if item.source_event_id in events and item.target_event_id in events
+            ],
             "effects": [
                 {
                     "props": _props(item),

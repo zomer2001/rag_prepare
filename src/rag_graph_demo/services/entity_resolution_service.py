@@ -24,6 +24,9 @@ CompleteFunc = Callable[[str, str], Awaitable[str]]
 RESOLUTION_SYSTEM_PROMPT = """你是受本体约束的实体消歧器。判断新提及是否指向候选实体。
 不得仅因名称相似就合并；类型、描述、上下文或唯一标识冲突时必须选择 CREATE_NEW 或
 AMBIGUOUS。只能输出 JSON，不得输出解释文字。"""
+OPEN_RESOLUTION_SYSTEM_PROMPT = """你是知识库实体消歧器。判断新提及是否指向候选实体。
+实体类型是可修正的软标签，类型名称不同不能单独作为拒绝匹配的理由；名称、别名、描述、
+上下文或唯一标识不一致时选择 CREATE_NEW 或 AMBIGUOUS。只能输出 JSON。"""
 RESOLUTION_PROMPT = """待解析实体：
 name: {name}
 type: {entity_type}
@@ -88,6 +91,7 @@ class EntityResolutionService:
         embedding_threshold: float = 0.72,
         auto_match_threshold: float = 0.94,
         llm_threshold: float = 0.78,
+        enforce_type: bool = True,
     ) -> None:
         self._type_mapper = type_mapper
         self._embed = embed
@@ -96,6 +100,7 @@ class EntityResolutionService:
         self._embedding_threshold = embedding_threshold
         self._auto_match_threshold = auto_match_threshold
         self._llm_threshold = llm_threshold
+        self._enforce_type = enforce_type
 
     async def resolve_batch(
         self,
@@ -106,7 +111,9 @@ class EntityResolutionService:
         unresolved: list[tuple[int, SemanticEntityCandidate, str, list[EntityRecord]]] = []
         for index, candidate in enumerate(candidates):
             entity_type = self._type_mapper.normalize(candidate.entity_type)
-            if entity_type is None:
+            if not self._enforce_type:
+                entity_type = self._open_type(candidate.entity_type)
+            elif entity_type is None:
                 exact_any_type = [
                     item
                     for item in snapshot.entities
@@ -135,15 +142,19 @@ class EntityResolutionService:
             same_type = [
                 item
                 for item in snapshot.entities
-                if item.entity_type == entity_type and item.status == "active"
+                if item.status == "active"
+                and (
+                    not self._enforce_type
+                    or item.entity_type == entity_type
+                )
             ]
             exact = [
                 item
                 for item in same_type
                 if identity_signature(candidate.name, entity_type)
                 in {
-                    identity_signature(item.canonical_name, entity_type),
-                    *(identity_signature(alias, entity_type) for alias in item.aliases),
+                    identity_signature(item.canonical_name, item.entity_type),
+                    *(identity_signature(alias, item.entity_type) for alias in item.aliases),
                 }
             ]
             if len(exact) == 1:
@@ -196,6 +207,11 @@ class EntityResolutionService:
             proposals[index] = await self._resolve_semantic(candidate, entity_type, same_type)
         return [item for item in proposals if item is not None]
 
+    @staticmethod
+    def _open_type(value: str) -> str:
+        cleaned = " ".join(value.split()).strip(" ,，;；")
+        return cleaned[:100] or "Entity"
+
     async def _resolve_semantic(
         self,
         candidate: SemanticEntityCandidate,
@@ -230,7 +246,10 @@ class EntityResolutionService:
                     item,
                     lexical_by_id[item.entity_id],
                     float(similarity),
-                    ["同本体类型", "名称与描述 Embedding 候选"],
+                    [
+                        "类型兼容" if item.entity_type == entity_type else "跨类型候选",
+                        "名称与描述 Embedding 候选",
+                    ],
                 )
                 for item, similarity in zip(pool, similarities, strict=True)
                 if similarity >= self._embedding_threshold
@@ -254,6 +273,10 @@ class EntityResolutionService:
             (top.embedding_score or 0) >= self._auto_match_threshold
             and (top.embedding_score or 0) - (second or 0) >= 0.08
             and top.lexical_score >= 0.6
+            and (
+                not self._enforce_type
+                or top.entity_type == entity_type
+            )
         ):
             return EntityResolutionProposal(
                 candidate_key=self._key(candidate),
@@ -294,7 +317,11 @@ class EntityResolutionService:
                     f"- {item.model_dump_json()}" for item in scores
                 ),
             ),
-            RESOLUTION_SYSTEM_PROMPT,
+            (
+                RESOLUTION_SYSTEM_PROMPT
+                if self._enforce_type
+                else OPEN_RESOLUTION_SYSTEM_PROMPT
+            ),
         )
         try:
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())

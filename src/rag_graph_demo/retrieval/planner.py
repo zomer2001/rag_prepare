@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 PlannerCompletion = Callable[[str, str], Awaitable[str]]
 QUERY_PLANNER_PROFILE_VERSION = "query_planner_v2_soft_event_hints"
+TKG_QUERY_PLANNER_PROFILE_VERSION = "query_planner_tkg_v1"
 LEGACY_QUERY_PLANNER_PROFILE_VERSION = "query_planner_v1"
 
 PLANNER_SYSTEM_PROMPT = """你是检索系统的 Query Planner。只分析用户问题，不回答问题，
@@ -37,6 +38,21 @@ PLANNER_PROMPT = """分析下面的问题，为文本向量、实体关系图和
 
 问题：{question}
 """
+TKG_PLANNER_PROMPT = """分析下面的问题，为统一时序知识图谱生成查询计划。
+
+字段要求：
+- low_level_keywords：具体名称、编号和对象词。
+- high_level_keywords：主题、能力与动作词。
+- entities：最多3个问题明确提到的实体；不得补充背景知识。
+- relations：最多4个问题明确询问的谓词或关系，如开发、使用、收购、属于；没有则为空。
+- event_types：最多4个明确要求的事件类型，如发布、合作、终止、纠正；没有则为空。
+- start_time、end_time：仅在原文明确出现日期或年份时输出ISO部分日期，否则为 null。
+- state_intents：从 latest、change、conflict、denial、correction、replacement 中选择。
+- expand_event_chain：问题询问先后、变化、原因、影响、纠正或替代时为 true。
+
+当前日期：{today}
+问题：{question}
+"""
 
 
 class QueryPlanner:
@@ -46,10 +62,14 @@ class QueryPlanner:
         *,
         cache_path: Path | None = None,
         strict_failures: bool = False,
+        profile: str = QUERY_PLANNER_PROFILE_VERSION,
+        prompt_template: str = PLANNER_PROMPT,
     ) -> None:
         self._complete = complete
         self._cache_path = cache_path
         self._strict_failures = strict_failures
+        self._profile = profile
+        self._prompt_template = prompt_template
         self._lock = asyncio.Lock()
         raw_cache = read_json(cache_path, default={}) if cache_path else {}
         self._cache: dict[str, QueryPlan] = {}
@@ -62,12 +82,16 @@ class QueryPlanner:
                 logger.warning("Ignoring malformed cached query plan: %s", key)
 
     async def plan(self, question: str) -> QueryPlan:
-        cache_key = self._cache_key(question)
+        cache_key = self._cache_key(question, profile=self._profile)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return self._sanitize(question, cached)
-        legacy = self._cache.get(
-            self._cache_key(question, profile=LEGACY_QUERY_PLANNER_PROFILE_VERSION)
+        legacy = (
+            self._cache.get(
+                self._cache_key(question, profile=LEGACY_QUERY_PLANNER_PROFILE_VERSION)
+            )
+            if self._profile == QUERY_PLANNER_PROFILE_VERSION
+            else None
         )
         if legacy is not None:
             plan = self._sanitize(question, legacy)
@@ -80,7 +104,7 @@ class QueryPlanner:
                 return self._sanitize(question, cached)
             try:
                 raw = await self._complete(
-                    PLANNER_PROMPT.format(
+                    self._prompt_template.format(
                         question=question,
                         today=datetime.now(UTC).date().isoformat(),
                     ),
@@ -166,6 +190,7 @@ class QueryPlanner:
             update={
                 "low_level_keywords": unique(plan.low_level_keywords, 12),
                 "high_level_keywords": unique(plan.high_level_keywords, 12),
+                "relations": unique(plan.relations, 4),
                 "entities": unique(plan.entities, 3),
                 "event_types": unique(plan.event_types, 4),
                 "start_time": start_time,

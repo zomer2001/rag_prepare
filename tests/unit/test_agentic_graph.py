@@ -147,6 +147,7 @@ def test_agentic_method_has_separate_retriever_and_manifest_profile(tmp_path) ->
             "agentic_hybrid",
             "agentic_light_entity",
             "agentic_ours",
+            "agentic_ours_tkg",
         ),
         show_progress=False,
     )
@@ -156,6 +157,9 @@ def test_agentic_method_has_separate_retriever_and_manifest_profile(tmp_path) ->
     )
     assert runner._method_retriever("agentic_ours", None, None).__func__ is (
         runner._retrieve_agentic_ours.__func__
+    )
+    assert runner._method_retriever("agentic_ours_tkg", None, None).__func__ is (
+        runner._retrieve_agentic_ours_tkg.__func__
     )
     assert runner._method_retriever("agentic_hybrid", None, None).__func__ is (
         runner._retrieve_agentic_hybrid.__func__
@@ -172,6 +176,7 @@ def test_agentic_method_has_separate_retriever_and_manifest_profile(tmp_path) ->
         "agentic_hybrid",
         "agentic_light_entity",
         "agentic_ours",
+        "agentic_ours_tkg",
     ]
 
 

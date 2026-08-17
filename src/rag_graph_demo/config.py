@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     event_extraction_max_events_per_part: int = Field(default=5, ge=1, le=30)
     event_index_concurrency: int = Field(default=3, ge=1, le=8)
     tkg_enabled: bool = True
+    tkg_schema_mode: Literal["ontology", "open"] = "ontology"
     tkg_ontology_version: str = "0.1.0"
     tkg_ontology_dir: Path = Path("ontology")
     tkg_registry_path: Path | None = None
@@ -93,6 +94,7 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = "rag-graph-demo-change-me"
     neo4j_database: str = "neo4j"
+    neo4j_workspace: str = "default"
     entity_type_mapping_file: Path = Path("ontology/mappings/entity_types.json")
     entity_resolution_enabled: bool = True
     entity_resolution_candidate_limit: int = Field(default=5, ge=1, le=20)

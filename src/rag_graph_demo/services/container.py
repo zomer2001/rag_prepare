@@ -66,6 +66,7 @@ class AppContainer:
                 settings.neo4j_user,
                 settings.neo4j_password,
                 database=settings.neo4j_database,
+                workspace_id=settings.neo4j_workspace,
             )
             if settings.neo4j_enabled
             else None
@@ -129,6 +130,11 @@ class AppContainer:
             tkg_registry=(
                 self.neo4j_store or self.tkg_registry
                 if settings.tkg_enabled
+                else None
+            ),
+            coordination_store=(
+                self.neo4j_store
+                if settings.tkg_enabled and self.neo4j_store is not None
                 else None
             ),
         )

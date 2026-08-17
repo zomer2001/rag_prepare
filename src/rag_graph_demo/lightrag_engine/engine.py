@@ -65,6 +65,11 @@ def _source_segment_id(value: dict[str, Any], chunks: dict[str, str]) -> str | N
     )
 
 
+def _bounded_relationship_predicate(value: Any) -> str:
+    """Convert LightRAG's accumulated keyword bag into a valid predicate hint."""
+    return str(value or "relatedFact").strip()[:200] or "relatedFact"
+
+
 def _doc_status_value(status: Any) -> DocStatus:
     value = status.get("status") if isinstance(status, dict) else status.status
     return value if isinstance(value, DocStatus) else DocStatus(str(value))
@@ -562,7 +567,11 @@ class LightRAGEngine:
                 SemanticRelationshipCandidate(
                     source=source,
                     target=target,
-                    predicate=str(edge.get("keywords") or "relatedFact"),
+                    # LightRAG stores a comma-separated keyword bag on an edge,
+                    # while the governed graph expects one bounded predicate hint.
+                    # Preserve enough keywords for canonicalization without letting
+                    # an accumulated cross-document bag violate the domain schema.
+                    predicate=_bounded_relationship_predicate(edge.get("keywords")),
                     description=description,
                     confidence=min(1.0, max(0.0, float(edge.get("weight") or 0.65))),
                     source_segment_id=_source_segment_id(edge, chunk_content)

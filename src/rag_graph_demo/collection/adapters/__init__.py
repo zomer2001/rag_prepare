@@ -4,6 +4,7 @@ pagination, rate limits and fallbacks in docs/source_playbook.md."""
 from __future__ import annotations
 
 from .anduril_site import AndurilSiteAdapter
+from .generic_web import GenericWebAdapter
 from .patents import PatentsViewAdapter
 from .rss_feed import RssFeedAdapter
 from .scholarly import OpenAlexAdapter
@@ -17,6 +18,7 @@ ADAPTERS = {
     "patentsview": PatentsViewAdapter,
     "rss_feed": RssFeedAdapter,
     "sitemap_archive": SitemapArchiveAdapter,
+    "generic_web": GenericWebAdapter,
 }
 
 

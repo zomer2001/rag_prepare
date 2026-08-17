@@ -7,6 +7,7 @@ from rag_graph_demo.domain.tkg import (
     AssertionRecord,
     EntityMention,
     EntityRecord,
+    TKGExpansionRequest,
     TKGQueryRequest,
     TKGSnapshot,
 )
@@ -24,6 +25,7 @@ async def test_real_neo4j_snapshot_query_and_graph() -> None:
         os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687"),
         os.getenv("NEO4J_USER", "neo4j"),
         os.getenv("NEO4J_PASSWORD", "rag-graph-demo-change-me"),
+        workspace_id="integration_test",
     )
     try:
         await store.initialize_schema()
@@ -76,6 +78,15 @@ async def test_real_neo4j_snapshot_query_and_graph() -> None:
             TKGQueryRequest(entity_name="Integration Acme")
         )
         graph = await store.query_graph(entity_name="Integration Acme")
+        expansion = await store.expand(
+            TKGExpansionRequest(
+                entity_ids=[organization.entity_id],
+                entity_scores={organization.entity_id: 0.92},
+                assertion_scores={assertion.assertion_id: 0.88},
+                rank_by_seed_score=True,
+                limit=10,
+            )
+        )
 
         assert result.assertions[0].assertion_id == "integration-assertion"
         assert {item.canonical_name for item in result.entities} == {
@@ -84,5 +95,7 @@ async def test_real_neo4j_snapshot_query_and_graph() -> None:
         }
         assert len(graph["nodes"]) == 3
         assert len(graph["edges"]) == 2
+        assert expansion.assertions[0].assertion_id == "integration-assertion"
+        assert expansion.mentions[0].document_id == "integration-document"
     finally:
         await store.close()

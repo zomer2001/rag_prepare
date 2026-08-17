@@ -1,0 +1,2422 @@
+Respecting Temporal-Causal Consistency: Entity-Event Knowledge Graph
+                for Retrieval-Augmented Generation
+      Ze Yu Zhang1,2† , Zitao Li2 , Yaliang Li2 , Bolin Ding2 , Bryan Kian Hsiang Low1,†
+                1
+                    School of Computing, National University of Singapore, Singapore
+                                       2
+                                         Alibaba Group, China
+                                 †
+                              {zhan1130, lowkh}@comp.nus.edu.sg
+                      {zitao.l, yaliang.li, bolin.ding}@alibaba-inc.com
+
+                       Abstract                               nal document retriever so that fresh, grounded ev-
+                                                              idence can be injected on demand (Lewis et al.,
+    Retrieval-augmented generation (RAG) based                2020). RAG not only extends an LLM’s effective
+    on large language models often falters on nar-            memory but also reduces hallucinations and allows
+    rative documents with inherent temporal struc-
+                                                              rapid knowledge updates without costly re-training
+    tures. Standard unstructured RAG methods rely
+    solely on embedding-similarity matching and               (Shuster et al., 2021; Lewis et al., 2020; Borgeaud
+    lack any general mechanism to encode or ex-               et al., 2022; Béchard and Ayala, 2024).
+    ploit chronological information, while knowl-                Vanilla unstructured RAG, however, treats each
+    edge graph RAG (KG-RAG) frameworks col-                   passage in isolation and therefore struggles with
+    lapse every mention of an entity into a single            reasoning that depends on a document’s tempo-
+    node, erasing the evolving context that drives            ral or causal structure. For example, the follow-
+    many queries. To formalize this challenge and
+    draw the community’s attention, we construct
+                                                              ing seemingly straightforward question for Harry
+    ChronoQA, a robust and discriminative QA                  Potter enthusiasts can be challenging for a RAG
+    benchmark that measures temporal, causal, and             system to answer reliably:
+    character consistency understanding in narra-
+                                                              Query 1. Who was jinxing Harry’s broom during
+    tive documents (e.g., novels) under the RAG
+    setting. We then introduce Entity-Event RAG
+                                                              his first Quidditch match?
+    (E2 RAG), a dual-graph framework that keeps                  Because effects in a story typically follow their
+    separate entity and event subgraphs linked by a           causes in time, losing chronological ordering also
+    bipartite mapping, thereby preserving the tem-
+                                                              obscures causal links. If a RAG system naively
+    poral and causal facets needed for fine-grained
+    reasoning. Across ChronoQA, our approach                  retrieves the seemingly most relevant passage from
+    outperforms state-of-the-art unstructured and             the earlier part of the story, it will incorrectly
+    KG-based RAG baselines, with notable gains                conclude that Snape was responsible for hexing
+    on causal and character consistency queries.              Harry’s broom. This error arises because it over-
+    E2 RAG therefore offers a practical path to more          looks crucial information revealed later–that Pro-
+    context-aware retrieval for tasks that require            fessor Quirrell was actually causing the interfer-
+    precise answers grounded in chronological in-             ence, while Snape’s suspicious actions were at-
+    formation.
+                                                              tempts to counteract Quirrell’s jinx. The key reason
+                                                              is that the document’s chronological context infor-
+1   Introduction
+                                                              mation, which is crucial for generating answers that
+Large language models (LLMs) have demonstrated                are both temporally coherent and causally sound,
+remarkable zero-shot and few-shot capabilities                is not preserved in the vanilla unstructured RAG
+across various NLP tasks. Yet, LLMs remain fun-               after being chunked.
+damentally constrained by their fixed context win-               To capture richer structure, knowledge-graph
+dow: once the prompt exceeds a certain length,                (KG) RAG methods such as GraphRAG build an en-
+processing becomes slow and the model’s reason-               tity graph over the corpus and retrieve communities
+ing capability is significantly impaired (Liu et al.,         of related nodes (Edge et al., 2024). Unfortunately,
+2023; Fiction.live, 2025; Li et al., 2024; Gao et al.,        the standard graph-construction pipeline relies on
+2024; An et al., 2024). To mitigate this limita-              aggressive deduplication of entity mentions; this
+tion, retrieval-augmented generation (RAG) was                collapses distinct temporal or contextual facets of
+introduced, coupling the generator with an exter-             the same character into a single node, discarding
+                                                         2017
+       Proceedings of the 19th Conference of the European Chapter of the Association for Computational Linguistics
+                                        Volume 1: Long Papers, pages 2017–2054
+                           March 24-29, 2026 ©2026 Association for Computational Linguistics
+information that is crucial in domains like narra-       retrieval time, beyond the vanilla pipeline, we intro-
+tive fiction, where characters evolve continuously.      duce an augmentation operation that calls the back-
+Consider the following query:                            bone LLM only once to inject richer context. Em-
+Query 2. How would Hermione Granger react if             pirically, this single-call augmentation lets E2 RAG
+a friend proposed breaking school rules after the        achieve significant gains on fine-grained narrative-
+troll incident?                                          reasoning queries, outperforming state-of-the-art
+                                                         unstructured and KG-based RAG baselines and
+   Hermione is introduced as a rule-obsessed know-
+                                                         pointing to a practical path toward more context-
+it-all who reprimands classmates for the small-
+                                                         aware retrieval for LLMs.
+est infractions (Ch. 9), yet after the troll incident
+                                                            The contributions of this work are as follows:
+(Ch. 10), she forges a deep friendship with Harry
+                                                         • We release ChronoQA, the first open, passage-
+and Ron and is soon helping them brew an ille-
+                                                         grounded benchmark that stresses temporal and
+gal potion and sneak past teachers to protect the
+                                                         causal reasoning over book-length narratives un-
+Stone. If every “Hermione Granger” mention is
+                                                         der a RAG setting.
+collapsed into a single KG node, a query will likely
+                                                         • We propose E2 RAG, a dual-graph retrieval frame-
+retrieve only her predominant rule-abiding persona–
+                                                         work that keeps every entity mention distinct and
+the class monitor who scolds Ron for casting Lu-
+                                                         grounded in its associated event, thereby preserv-
+mos in the corridor–while overlooking later chap-
+                                                         ing the causal and temporal consistency of evolving
+ters in which she calmly steals ingredients and slips
+                                                         characters and plot.
+past teachers to protect the Stone (Ch. 16). Thus,
+                                                         • Extensive experiments demonstrate that variants
+the aggressive deduplication of entity mentions in
+                                                         of E2 RAG outperform state-of-the-art unstructured
+KG-RAG methods can erase her arc from strict
+                                                         and KG-based RAG baselines on ChronoQA.
+disciplinarian to pragmatic rule-breaker, masking
+precisely the nuance the question probes and lead-
+                                                         2     Related Work
+ing the system to an outdated, inaccurate answer.
+   To rigorously define the challenge of temporal-       2.1    Retrieval-Augmented Generation (RAG)
+causal consistency in RAG applications and evalu-
+                                                         Although today’s large language models can store
+ate how current RAG systems handle the aforemen-
+                                                         vast amounts of world knowledge, that knowledge
+tioned narrative-focused challenges, we construct
+                                                         is static, unverifiable, and expensive to refresh.
+ChronoQA, a retrieval-style QA benchmark drawn
+                                                         Lewis et al. (2020) demonstrated that attaching
+from 18 narrative works. Every question targets
+                                                         a live retriever to a generator lets the model pull
+one of eight fine-grained reasoning facets, ranging
+                                                         up-to-date evidence on demand, achieving higher
+from causal and character consistency to symbol-
+                                                         accuracy than closed-book BART while returning
+ism and thematic insight.
+                                                         the very passages that support each claim. Sub-
+   To address the aforementioned challenges, we
+                                                         sequent analyses show that retrieval-augmented
+propose an Entity-Event KG composed of (i) an
+                                                         language models markedly cut hallucination rates,
+entity subgraph; (ii) an event subgraph; and (iii)
+                                                         especially on fact-heavy tasks, because retrieved
+a bipartite edge set that maps each entity men-
+                                                         text provides an external “ground truth” that the
+tion to the events in which it participates, thereby
+                                                         decoder can copy or paraphrase instead of guess-
+preserving those nuances. Instead of collapsing
+                                                         ing (Lv et al., 2024; Mala et al., 2025). Gao et al.
+duplicates, we first extract both entities and their
+                                                         (2023) go a step further: their H Y DE method lets
+associated events, then link every event to the spe-
+                                                         the LLM hallucinate a “hypothetical” answer, em-
+cific mention of each participating entity; because
+                                                         beds it, and uses that vector to query the index,
+we never merge mentions that arise in different
+                                                         delivering precise zero-shot dense retrieval without
+parts of the story, each entity node carries its own
+                                                         relevance labels, an idea we later adapt in Section 4.
+context-specific description. The resulting graph
+                                                         RAG also sidesteps model-update costs: keeping
+retains multiple, context-specific representations
+                                                         the index current is far cheaper and faster than
+of entities while still exposing the relational struc-
+                                                         re-training or fine-tuning multi-billion-parameter
+ture needed for retrieval. We term the resulting
+                                                         networks, a point underscored by adaptive systems
+RAG framework, which retrieves over the proposed
+                                                         such as Self-RAG and Speculative RAG that re-
+entity-event KG, Entity-Event RAG (E2 RAG).1 At
+                                                         trieve only when necessary and verify drafts to stay
+   1
+       https://github.com/zyzhang1130/EntityEventRAG.    both efficient and factual (Lv et al., 2024; Lewis
+                                                     2018
+et al., 2020). Finally, long-context methods like           give the model the entire story up front, they mea-
+LongRAG show that retrieval can extend an LLM’s             sure intrinsic long-context reasoning rather than
+effective memory without quadratic attention over-          the retrieval quality.
+head, enabling faithful reasoning over book-length
+evidence while keeping latency low (Jiang et al.,           3   New Benchmark: ChronoQA
+2024). In short, RAG equips LLMs with a dynamic,
+interpretable, and cost-effective memory that tack-         Existing long-context reasoning datasets can be
+les three core limitations: knowledge staleness, hal-       adapted to benchmark RAG methods. How-
+lucination, and limited context length, challenges          ever, they provide limited support for evaluating
+that purely parametric models still struggle with.          temporal-causal consistency in a retrieval setting
+                                                            for three reasons: (i) Most existing datasets fo-
+2.2 Knowledge Graph based RAG                               cus on general long-context tasks, but have lim-
+GraphRAG (Edge et al., 2024) explicitly builds              ited focus on these challenging reasoning tasks
+an entity-level knowledge graph, runs community             related to temporal-causal consistency. For exam-
+detection, and then retrieves and summarizes the            ple, a rare existing task requires reasoning over
+most query-relevant communities, thereby improv-            a character’s time-specific state (e.g., “late-story
+ing the relevance of the top-k chunks with respect          Hermione” versus “early-story Hermione”). (ii)
+to a query. Follow-up studies highlight three prac-         Existing benchmarks typically provide no passage-
+tical drawbacks of this design: (i) the multi-pass          level evidence for their ground-truth answers. Un-
+entity/relation extraction and community-summary            like long-context tasks, which only evaluate the
+generation make preprocessing costly in both to-            model answers, evaluating the retrieval snippets
+kens and compute, (ii) traversing and summarizing           is also a common metric when benchmarking the
+the graph at inference time adds 2–3× end-to-end            RAG systems. However, without the passage-level
+latency, and (iii) the graph index and its summaries        evidence, extra effort may be required to determine
+grow super-linearly with corpus size, complicating          the retrieval stage’s correctness. (iii) Although
+incremental updates and ballooning memory usage             some datasets (e.g., Fiction.live (2025)) also fo-
+(Wang et al., 2025; Chen et al., 2025; Peng et al.,         cus on tasks based on narrative documents, they
+2024).                                                      rely on an entirely private evaluation framework
+   LightRAG (Guo et al., 2024) tackles these limi-          with no publicly available data. These gaps make it
+tations by folding relational signals into a standard       difficult for researchers to verify reported results or
+dense index and introducing a dual-level, coarse-to-        to probe where and why current RAG systems fail.
+fine retriever that first selects cluster representatives      To test whether different RAG systems can rea-
+and then expands to their ego networks; this re-            son over a document’s temporal and causal con-
+moves explicit graph traversal, supports incremen-          sistency, we introduce ChronoQA: a QA bench-
+tal index patches, and reduces indexing token cost          mark built from 18 narrative works spanning nov-
+by ≈ 60% while roughly halving median query                 els, musical scripts, and children’s stories. For
+latency, all without hurting answer quality on Ultra-       each story we automatically generate questions that
+Domain, QFS and other multi-hop QA benchmarks               probe eight fine-grained reasoning facets:
+(Guo et al., 2024; Chen et al., 2025).                      • Causal Consistency – cause and effect, logical
+                                                            sequences, or explanations of how events unfolded.
+2.3 Long-context narrative benchmarks                       • Character and Behavioral Consistency – charac-
+Recent work has begun to probe whether LLMs                 ter motivations, development, or psychology.
+can reason over book-length inputs without trunca-          • Setting, Environment and Atmosphere – physical
+tion. XL2 B ENCH (Ni et al., 2024), L OONG (Wang            locations, time periods, or mood/atmosphere
+et al., 2024), and L ONG G EN B ENCH (Liu et al.,           • Symbolism, Imagery and Motifs – symbolic el-
+2024) extend QA or generation tasks to 100                  ements, recurring imagery, or metaphorical repre-
+K-token contexts, while the very recent F IC -              sentations.
+TION .L IVE B ENCH (Fiction.live, 2025) packages            • Thematic, Philosophical and Moral – deeper
+full user-written stories into the prompt and asks          meanings, philosophical ideas, or ethical implica-
+multi-step comprehension questions that require             tions
+tracking characters and foreshadowing across tens           • Narrative and Plot Structure – story organization,
+of thousands of tokens. Because these benchmarks            plot devices, or narrative techniques.
+                                                        2019
+                                                                                   Hermione            Scolds Ron for Lumos
+• Social, Cultural and Political – societal contexts,                       rule-obsessed first-year       in corridor...
+cultural elements, or political dimensions.                                      Hermione              Brews illicit potion
+• Emotional and Psychological – emotional re-                               pragmatic rule-breaker     to protect Stone...
+
+sponses, psychological states, or mental processes.             Figure 1: Illustration of two temporally distinct
+   The questions from each category require solid               Hermione mentions and their associated events.
+understanding grounded in the progression of the
+story and cause-and-effect of the elements involved             2025b), Claude-3.7-Sonnet (Anthropic, 2025a),
+in the plot. Our ChronoQA closes the aforemen-                  and Claude-Opus-4.1 (Anthropic, 2025b)) together
+tioned gaps with:                                               with a category list and an instruction to propose
+• Focus on temporal and causal consistency –                    diverse question-answer pairs per category (prompt
+each query hinges on a character’s specific tempo-              template in Appendix H.1).3 For each proposed
+ral facet (e.g., “after the troll incident”), so retriev-       pair, the generating model’s answer is retained as
+ing an early-story snippet fails.                               provisional ground truth.
+• Passage-level supervision – every answer is                   • Verification, filtering and deduplication: For
+paired with exact start/end byte offsets, making                each ground truth, the oracle model is required to
+verification straightforward and reliable.                      output the starting sentence and ending sentence of
+• Accessibility – most narratives are drawn from                the excerpt where the answer can be inferred. We
+Project Gutenberg, putting the full texts in the pub-           discard candidate questions that are duplicates or
+lic domain. Unlike fully private benchmarks, this               for which the excerpt extracted does not substanti-
+allows users to obtain, inspect, and redistribute the           ate the answer.
+benchmark data.2
+   Thus, ChronoQA tests whether a RAG system
+                                                                4    Methodology
+can (1) fetch the right snippet when the full story             Standard KG-RAG preprocessing merges all en-
+cannot fit into context and (2) reason over evolving            tity mentions extracted from a chunked document
+entity states throughout the story.                             (e.g., “Hermione Granger”, “Professor Quirrell”,
+                                                                or the “Sorcerer’s Stone”) into a single node, oblit-
+Dataset statistics. The final release contains 18
+                                                                erating the time-specific information. Such nuance
+stories and 1028 question-answer pairs. The actual
+                                                                is needed to answer questions such as Query 2. We
+number of question-answer pairs for each story and
+                                                                therefore keep each mention (a concrete, context-
+categories can be found in Table 1 and Table 6.
+                                                                specific instance of an entity as it appears in a single
+Other details can be found in Appendix A. The
+                                                                chunk of text, e.g., “Hermione” in Chapter 9 ver-
+dataset can be found at https://huggingface.
+                                                                sus “Miss Granger” in Chapter 16) distinct and
+co/datasets/zy113/ChronoQA.
+                                                                tether it to the event snippet in which it occurs. In-
+       Table 1: Questions per reasoning category.               tuitively, the structure is as shown in Figure 1. The
+                                                                left column holds entity mentions and their con-
+        Category                               # Questions
+                                                                textual descriptions; the right column holds events
+        Character and Behavioral Consistency          392
+        Causal Consistency                            278       and their descriptions. Treating the entity as two
+        Social, Cultural and Political
+        Thematic, Philosophical and Moral
+                                                       74
+                                                       72
+                                                                disjoint vertex sets ensures temporal facets never
+        Symbolism, Imagery and Motifs                  68       collapse. Unlike entities, repeated mentions of the
+        Setting, Environment and Atmosphere            57
+        Narrative and Plot Structure                   44       same event are deduplicated into a single event
+        Emotional and Psychological                    43
+                                                                node that keeps an occurrence list; entity mentions
+        Total                                        1028
+                                                                remain distinct.
+Generation pipeline. Because every story is                     Formal definition. Event schema. We model
+short enough to fit within the oracle’s context win-            each event as e = ⟨trigger, desc, τ ⟩, where trig-
+dow, we do not chunk the text. Instead we use a                 ger is the lexical anchor, desc is a one- to two-
+two-stage pipeline:                                             sentence description produced by the extractor, and
+• QA candidates generation: The entire story                    τ stores narrative position. In our implementation
+is provided to multiple oracle models (GPT-                     τ = source_id (the chunk id); optional offsets
+o1-pro (Jaech et al., 2024), GPT-o3 (OpenAI,
+                                                                   3
+                                                                     We include multiple oracles because the strongest publicly
+   2
+     For the few copyrighted works we release derived annota-   available model changes over time; this reduces sensitivity to
+tions and require users to obtain the text independently.       any single model’s quirks and biases.
+
+                                                             2020
+                              Figure 2: Overall architecture of the E2 RAG framework.
+(e.g., byte or sentence indices) are kept in meta-            Temporal modeling and preservation. Our
+data.                                                         entity–event KG preserves time through three com-
+   Let Gent = (Vent , Eent ) be the directed graph of         plementary signals.
+entity mentions and Gevt = (Vevt , Eevt ) the graph              (i) Narrative order. Every node stores its doc-
+of events. For convenience we write τ (e) and                 ument position (chapter, chunk id, and byte or
+chunk(v) for the chunk id; we use desc(e) and                 sentence span). This yields an intrinsic ordering
+name(v) for the event description and the entity              of mentions across the story without an absolute
+surface form. The two are connected with an edge              clock.
+set                                                              (ii) Typed event-event edges. When a chunk
+                                                             states a temporal or causal link, the extractor adds
+B = (v, e) v ∈ Vent , e ∈ Vevt , chunk(v) = τ (e),
+                                                              a directed edge with a label drawn from an extensi-
+ contains(norm(desc(e)), norm(name(v))) .
+                                                              ble schema (e.g., PRECEDES, FOLLOWS, DURING,
+                                                  (1)
+                                                              CAUSES, COUNTERACTS, REVEALS, PARALLELS);
+An edge (v, e) ∈ B is created when the entity                 additional fine-grained labels may be emitted and
+mention and the event come from the same chunk                are stored verbatim. Typed event-event edges are
+(chunk(v) = τ (e)) and the (normalized) entity                assigned by an LLM that uses local cue phrases and
+surface form appears in the event description. The            semantic context; the raw cue (if any) is kept in
+bipartite graph refers to the inter-layer subgraph            metadata. These edges retain relative chronology
+induced by B, i.e., (Vent
+                        B ∪ V B , B) with V B =
+                               evt           ent              and causal direction after chunking.
+{v ∈ Vent : ∃e (v, e) ∈ B} and VevtB = {e ∈ V
+                                                evt :            (iii) Event deduplication. Multiple textual men-
+∃v (v, e) ∈ B}. Details and examples appear in                tions of the same event are deduplicated to a single
+Appendix C.                                                   event node that stores all its occurrences (positions
+Event-event edges. We maintain typed edges be-                and spans). In contrast, entity mentions are not
+tween event nodes when the text in a chunk explic-            merged: each entity node is a context-aware men-
+itly or implicitly states a relation (e.g., PRECEDES,         tion linked by a bipartite edge to the event instance
+CAUSES, COUNTERACTS, REVEALS, PARALLELS).                     it participates in. This preserves temporally distinct
+These edges are assigned by the extractor using               facets of a character while still consolidating the
+cue phrases and local semantics and are preserved             underlying event.
+under event deduplication; each link stores the cue
+                                                              What temporal information is captured? We
+(if any) as metadata. The narrative position τ is
+                                                              capture (a) explicit temporal expressions such as
+recorded for each event but is not used to generate
+                                                              “the next morning” or “at dinner” in node or edge
+edges directly; it preserves ordering for later use.
+                                                              metadata; (b) relative relations such as before, after,
+Let λ : Eevt → Rlink assign each event-event edge
+                                                              and during via typed edges between events; and
+its relation label. We denote the labeled view of
+                                                              (c) implicit order through each node’s narrative
+Eevt (i.e., typed event-event edges) by
+                                                              position. We do not normalize to absolute time; the
+Elink = {(e, ρ, e′ ) | (e, e′ ) ∈ Eevt , ρ = λ(e, e′ )}.      combination of typed relations and narrative order
+                                                              is sufficient for the narrative QA that we target.
+   Here Rlink is an extensible label set produced by
+the extractor (e.g., PRECEDES, FOLLOWS, DURING,               Preprocessing. E2 RAG consists of the following
+CAUSES, COUNTERACTS, REVEALS, PARALLELS);
+                                                              preprocessing steps to build knowledge graphs4 .
+additional fine-grained labels may be emitted and
+are stored verbatim.                                              4
+                                                                      Pseudocode can be found as Algs. 1 and 2 in the appendix.
+
+                                                           2021
+1. Chunking. The document is split into chunks          over the typed event-event edges Elink :
+{cℓ }Lℓ=1 and stored in a key-value store.
+2. Creating entity and event sets. Each chunk cℓ
+                                              (ℓ)
+is fed twice to an LLM to extract entities Vent and     Vq+ = Vq ∪ { v ∈ Vent | ∃e ∈ Vqevt : (v, e) ∈ B }
+          (ℓ)
+events Vevt respectively. For every entity and event               ∪ { e′ ∈ Vevt | ∃e ∈ Vqevt , ρ ∈ Rlink :
+extracted, we also ask the LLM for a one-sentence                 (e, ρ, e′ ) ∈ Elink }.                  (2)
+description. For entities, this description will be
+context-aware so the same entity extracted from         How temporal information affects retrieval.
+different document chunks will have different de-       After seed selection, we expand from the event
+scriptions (e.g. “Hermione–rule-obsessed first-year”    seeds Vqevt . The bipartite mapping B brings in the
+versus “Hermione–pragmatic rule-breaker”). This         entity mentions participating in those events, while
+description is stored in the node’s description         typed event-event edges Elink bring in events that
+field and is kept distinct for every mention. The ex-   the text marks as temporally or causally related
+                                        S (ℓ)
+tractions form the node sets Vent = ℓ Vent and          (e.g., REVEALS). This ensures that if an early event
+          S (ℓ)                                         is retrieved, later clarifying events linked through
+Vevt = ℓ Vevt . Co-mentions inside the same
+chunk yield the directed edge sets Eent and Eevt        Elink are also considered.
+exactly as in LightRAG.                                 5. Similarity ranking and score propagation.
+3. Link entities to events (B). For every en-              All passages are embedded offline; at query
+              (ℓ)
+tity v ∈ Vent we scan the events e ∈ Vevt ; if
+                                               (ℓ)      time we compute similarities only for nodes in
+the entity surface form name(v) appears (exact          Vq+ . Event scores are propagated to linked entities
+or normalized) in desc(e), we add (v, e) to B           via B and to one-hop neighboring events via typed
+(Eq. 1). Because both v and e originate from the        event-event edges. An entity that participates in a
+same chunk ℓ, this step enforces the chunk gating       high-scoring event is up-weighted even if the entity
+chunk(v) = τ (e) used in the formal definition.         mention alone is only moderately similar to the
+                                                        query. Likewise, an event connected by a temporal
+4. Embed and index. Each node’s name and de-
+                                                        edge to a high-scoring event inherits part of that
+scription are embedded with embedding model
+                                                        score. This re-ranking preserves temporally consis-
+f (·) and written to two separate vector stores for
+                                                        tent evidence: entity mentions remain tethered to
+entities and events respectively, while full graph
+                                                        the time-appropriate events, and later disambiguat-
+Gent ∪ Gevt ∪ B is saved for hop-limited traversals,
+                                                        ing events can outrank earlier but misleading ones.
+including the event-event edge labels (i.e., Elink ).
+                                                        The number of expansion hops is a tunable hyper-
+   Figure 2 shows the overall pipeline of E2 RAG and
+                                                        parameter; we use one hop in the main experiments
+Figure 4 shows a subgraph of the Entity-Event KG
+                                                        and ablate this choice on ChronoQA in Section 5
+of Harry Potter and the Sorcerer’s Stone and an
+                                                        (Table 5).
+event node’s metadata.
+                                                        6. Context assembly. We collect (i) the raw pas-
+Query-time retrieval. Given a query q, the re-          sages behind the top-k nodes; (ii) a linearized dump
+trieval mechanism conducts the following steps.         of the subgraph Gsub = (Vq+ , (Eent∪Eevt∪B∪Elink )∩
+1. Cue extraction. A pair of entity and event phrase    (Vq+×Vq+ )); and (iii) the metadata (descriptions, la-
+sets are first extracted by an LLM extractor g(·),      bels, etc.) associated with every selected node and
+namely (Sent , Sevt ) = g(q)                            edge. This enriched, structured context is fed to
+                                                        the backbone LLM, allowing it to answer questions
+2. Embedding generation. The (Sent , Sevt ) will
+                                                        that demand fine-grained temporal and causal rea-
+be fed into the embedding model to generate an
+                                                        soning using the truly relevant document chunks.
+embedding z used for retrieval, e.g., z = f (g(q)).
+                                                           Together, these two routines turn the intuition
+3. Seed nodes retrieval. With the embedding z, the
+                                                        from Figure 1 into a fully operational retrieval
+next step is to retrieve seed nodes Vq ⊆ Vent ∪ Vevt
+                                                        pipeline, with B acting as the critical “glue” that
+from the vector stores.
+                                                        preserves evolving entity states across time.
+4. One-hop expansion. We initialize Vq with both
+entity and event seeds. Let Vqevt := Vq ∩ Vevt          Hypothetical response coupling. One potential
+denote the event-seed subset of Vq . We treat events    limitation of E2 RAG is that the retrieval effective-
+as the expansion frontier and take one step from        ness heavily depends on how much information
+Vqevt over the chunk-gated bipartite edges B and        can be extracted from the query. If the query lacks
+                                                    2022
+details, the extraction might not be able to capture     vanilla HyDE (Gao et al., 2023) as well as vanilla
+enough information, preventing the core mecha-           RAG. In addition, we also give the hybrid mode of
+nism from being fully utilized. To make the entity–      LightRAG the same four variants with the hypothet-
+event approach more effective, we incorporate the        ical response which yields 13 baselines excluding
+core idea in HyDE (Gao et al., 2023). HyDE first         our E2 RAG variants. All methods use GPT-4o-mini
+asks the backbone LLM to draft a hypothetical            (Hurst et al., 2024) as the backbone LLM for pre-
+response without the document, then merges the           processing, inference, or both, and text-embedding-
+embedding of the hypothetical response with the          3-small (OpenAI, 2024) as the embedding model
+original query before performing similarity-based        f (·).
+retrieval. Even though the content might be factu-
+ally off, the inclusion of the hypothetical response     Evaluation. For each query, we provide each
+provides a richer context for similarity matching.       LLM judge with the query, the ground truth, and
+   We introduce four variants of the hypothetical re-    the responses of the variants of E2 RAG and all base-
+sponse mechanism in E2 RAG for retrieving more ac-       lines. Each answer is graded independently by
+curate and comprehensive information. To clearly         J = 6 LLM judges (Claude 3.7 Sonnet, Claude
+present them, we use h to denote the hypothetical        Opus 4.1, Gemini 2.5 Pro (Google, 2025), Qwen-
+response and [q; h] as text-level concatenation of       max (Alibaba Cloud, 2025), GPT-4o (Hurst et al.,
+the original query q and hypothetical response h.        2024) and GPT-4.1-mini (OpenAI, 2025a); check
+1. Combined extraction (Comb. extraction). In-           Appendix N for the specific checkpoints used) on
+stead of providing the query q to the extractor, this    a 1-10 Likert scale using the rubric in Appendix
+approach gives [q; h] as input to the extractor, and     H.2. The overall quality score for a system is the
+generates an embedding z = f (g([q; h])).                mean of those ratings across allP   samples and judges,
+                                                                                          1    J    1 PN
+2. Hypothetical extraction (Hyp. extraction) . Simi-     computed as Score = J j=1 N i=1 sij ,
+larly, this variant replaces the original query q with   where N is the number of question-answer pairs in
+the hypothetical response h to the extractor, and        the test set; J is the number of LLM judges; and
+embeds the output, i.e., z = f (g(h)).                   sij ∈ {1, . . . , 10} is the score assigned by judge j
+                                                         to sample i. We report the (mean score) in Table 2;
+3. Combined embedding (Comb. embedding). This
+                                                         per-judge scores are provided in Appendix K.
+method omits the extractor, and directly embeds the
+concatenated hypothetical response and the original
+query, i.e., z = f ([q; h]).                             Judge agreement. To ascertain the consistency
+4. Hypothetical embedding (Hyp. embedding).              of the six LLM judges’ evaluations, we compute
+Similar to the above one in terms of removing the        pairwise Spearman rank correlations between all in-
+extractor step, we directly generate embeddings          dividual judges. As shown in Table 4, the pairwise
+with the hypothetical response, i.e., z = f (h).         correlations range from 0.54 to 0.91 (mean 0.78,
+   We experiment with these four variants to in-         median 0.80), indicating that despite calibration dif-
+vestigate the importance of two key factors: in-         ferences, the judges agree closely on ranking and
+corporating the original query and employing the         the aggregated scores reflect a robust consensus.
+extraction step. Specifically, we examine how the                       Table 2: Overall average scores
+presence or absence of the original query and the
+extraction mechanism affect retrieval effectiveness.        Rank   Mode                                 Avg Score   Total
+
+After generating embeddings using each approach,               1    2
+                                                                   E RAG (comb. extraction)              6.400 0    38 581
+                                                               2   E2 RAG (hyp. embedding)               6.350 0    38 425
+the following steps are identical to the query-time            3   E2 RAG (comb. embedding)              6.320 0    38 041
+retrieval steps 3 to 6 introduced earlier.                     4   E2 RAG (hyp. extraction)              6.310 0    38 016
+                                                               5   LightRAG hybrid                       6.250 0    36 740
+                                                               6   GraphRAG local                        6.230 0    36 559
+5   Experiments                                                7
+                                                               8
+                                                                   E2 RAG (vanilla)
+                                                                   GraphRAG drift
+                                                                                                         6.130 0
+                                                                                                         6.110 0
+                                                                                                                    36 239
+                                                                                                                    35 797
+                                                               9   LightRAG local                        5.980 0    35 415
+Baselines. We compare the five variants of E2 RAG             10   LightRAG global                       5.820 0    34 347
+                                                              11   GraphRAG global                       5.750 0    34 219
+(four hypothetical response variants, one without             12   vanilla HyDE                          5.550 0    33 376
+                                                              13   vanilla RAG                           5.390 0    31 919
+hypothetical response) against the three modes of             14   LightRAG hybrid (comb. embedding)     5.370 0    31 683
+LightRAG (Guo et al., 2024) (local, global, hybrid),          15   LightRAG hybrid (comb. extraction)    5.370 0    31 235
+                                                              16   LightRAG hybrid (hyp. embedding)      5.340 0    31 699
+three modes of GraphRAG (Edge et al., 2024) (lo-              17   LightRAG hybrid (hyp. extraction)     5.330 0    31 043
+                                                              18   RQ-RAG                                3.320 0    19 239
+cal, global, drift), RQ-RAG (Chan et al., 2024),
+                                                     2023
+Table 3: Preprocessing runtimes for the
+three KG-RAG systems
+
+System      Stage                          Time (s)
+LightRAG    Total pipeline                 101.1723
+            Entity subgraph construction   108.3549
+            Event subgraph construction    103.6091
+E2 RAG
+            Bipartite-mapping                0.5076
+            Total pipeline                 108.8625
+GraphRAG    Total pipeline                 208.9904
+
+
+
+
+                                                          Figure 3: Heatmap of the scoring for each category and mode.
+
+  Judge A                    Judge B                  Spearman rs      We speculate that because E2 RAG avoids collaps-
+  Claude-3.7-Sonnet          GPT-4o                      0.853         ing distinct entity mentions into a single node, it
+  Claude-3.7-Sonnet          GPT-4.1-mini                0.860         synergizes particularly well with the hypothetical
+  Claude-3.7-Sonnet          Claude-Opus-4.1             0.882
+  Claude-3.7-Sonnet          Gemini-2.5-Pro              0.905
+                                                                       response, achieving top performance regardless of
+  Claude-3.7-Sonnet          Qwen-max                    0.622         the specific variant used. Furthermore, the hypo-
+  GPT-4o                     GPT-4.1-mini                0.862         thetical response provides a richer context and an
+  GPT-4o                     Claude-Opus-4.1             0.688
+  GPT-4o                     Gemini-2.5-Pro              0.767         abundance of entity and event candidates. This is
+  GPT-4o                     Qwen-max                    0.802         beneficial for matching when there are event nodes
+  GPT-4.1-mini               Claude-Opus-4.1             0.804         to provide grounding to the entities to mitigate hal-
+  GPT-4.1-mini               Gemini-2.5-Pro              0.839
+  GPT-4.1-mini               Qwen-max                    0.732         lucination. Figure 3 plots the category-average
+  Claude-Opus-4.1            Gemini-2.5-Pro              0.878         scores (averaged over the six LLM judges). In
+  Claude-Opus-4.1            Qwen-max                    0.538         every category, the top-scoring model is again an
+  Gemini-2.5-Pro             Qwen-max                    0.657
+                                                                       E2 RAG hypothetical response variant. More details
+Table 4: Pairwise Spearman rank correlation (rs ) be-                  are in Appendix K. We also evaluate on Complex-
+tween every pair of individual LLM judges’ rankings                    TR (Tan et al., 2024), a temporal QA dataset over bi-
+on ChronoQA. Overall, the results indicate the relative                ographical and factual contexts, and observe E2 RAG
+ranking is stable across judges despite different scoring              remains top-performing; see Appendix Q.
+scales.
+
+                                                                       Hop-depth ablation. Eq. (2) defines a one-hop
+Results. In the overall ranking, the top-3 modes                       expansion from event seeds over the bipartite entity-
+are all hypothetical response variants of E2 RAG,                      event edges B and the typed event-event edges
+while E2 RAG (vanilla) loses to GraphRAG local                         Elink . To study the effect of expansion depth, we
+and LightRAG hybrid mode. This corroborates                            ablate the number of expansion hops by iteratively
+that hypothetical responses play a major role in im-                   applying the one-hop operator for 1, 2, 4, and 8
+proving retrieval quality. In particular, the superior                 hops for all four hypothetical response variants of
+performance of the combined extraction variant,                        E2 RAG, while keeping all other settings fixed.5 Ta-
+followed by the combined embedding variant, con-                       ble 5 shows that one hop is consistently best across
+firms that both incorporating the original query and                   all four hypothetical-response variants; larger hop
+employing the extraction step further enhance the                      depths reduce performance, suggesting that addi-
+retrieval effectiveness. However, it is noteworthy                     tional hops mainly introduce more distant and nois-
+that HyDE alone is not sufficient: vanilla HyDE is                     ier events for ChronoQA questions. This indicates
+well below the strongest baselines, and applying the                   the performance gains of E2 RAG come from the
+same hypothetical response variants to LightRAG                        entity-event representation and typed event links
+hybrid does not improve and in fact degrades per-                      rather than deeper graph traversal.
+formance relative to its vanilla form (Table 2). This
+suggests that hypothetical response helps primar-                          5
+                                                                            For h > 1, the expansion frontier includes all nodes
+ily when paired with E2 RAG’s entity-event graph.                      (entities and events) reached in the previous hop.
+
+                                                                    2024
+Mode                       1 hop 2 hops 4 hops 8 hops         verdicts given by GPT-4.1-mini. The complete ver-
+E RAG (comb. extraction)
+ 2
+                           6.400   6.304   6.351   6.355      dicts of LLM judges can be found in Appendix J.3.
+E2 RAG (hyp. embedding)    6.350   6.186   6.215   6.207      Overall, pairing with hypothetical response, E2 RAG
+E2 RAG (comb. embedding)   6.320   6.260   6.299   6.307      is able to retrieve contextually relevant chunks
+E2 RAG (hyp. extraction)   6.310   6.257   6.230   6.232
+                                                              rather than surface-level matches, yielding more
+Table 5: Hop-depth ablation on ChronoQA (average              thorough and accurate answers. The details on the
+judge score; higher is better) by varying the number of       extraction and retrieval of E2 RAG (comb. extrac-
+expansion hops. One hop is consistently best (bolded)         tion) mode can be found in Appendix J. Due to
+across all four hypothetical-response variants. Addi-         the space constraints, complete responses of other
+tional hops mainly pull in more distant and noisier           modes are provided in the supplementary materials.
+events, which dilutes relevance scores.
+                                                              6   Conclusion
+Preprocessing time cost. Table 3 shows the pre-
+                                                              E2 RAG keeps every entity mention separate and an-
+processing time of the novel The Phantom of the
+                                                              chors it to the exact events in which it appears,
+Opera for three KG-based RAG approaches used
+                                                              restoring the temporal and causal context that
+in our experiments.
+                                                              vanilla RAG and deduplicated KG variants fail
+   Compared to LightRAG, although E2 RAG needs
+                                                              to capture. On the new ChronoQA benchmark–
+to construct two subgraphs (Gent , Gevt ) as opposed
+                                                              designed specifically to test narrative, causal, and
+to just a single entity KG, and form B (Bipartite
+                                                              character-consistency reasoning–it delivers the best
+mapping), the two subgraphs’ constructions are in-
+                                                              overall and category-specific scores while match-
+dependent and can be carried out in parallel. Form-
+                                                              ing LightRAG’s preprocessing cost and latency. Be-
+ing B is sequential after the subgraphs’ construc-
+                                                              cause it builds on off-the-shelf extraction prompts
+tion, but for (Gent , Gevt ) of reasonable size such as
+                                                              and vector stores, requires no model fine-tuning,
+in this example, its cost is negligible in practice. As
+                                                              and pairs naturally with hypothetical response,
+a result, E2 RAG has preprocessing time comparable
+                                                              E2 RAG offers a drop-in upgrade for more faithful
+to LightRAG (subject to API query traffic fluctua-
+                                                              retrieval and a foundation for future work on RAG
+tions), whereas GraphRAG is noticeably slower.
+                                                              for complex question-answering tasks.
+Token Cost Analysis. During the KG construc-
+tion phase, since event extraction is done separately         Limitations
+from entity extraction, E2 RAG has twice the number
+of API calls of LightRAG with the same max token              E2 RAG targets documents with inherent temporal
+count Cextract , which doubles its worst-case token           or causal structure (e.g., novels, scripts, and other
+cost during preprocessing. On the other hand, as              narrative texts). On corpora without such structure,
+the author of LightRAG pointed out, GraphRAG                  it may offer limited gains over methods designed
+still has much higher token consumption when                  for those settings.
+it comes to KG construction due to massive, re-
+peatedly generated community reports (Guo et al.,             Ethical Considerations
+2024) (refer to Table 8 for the cost on preprocess-
+ing The Phantom of the Opera). During retrieval,              ChronoQA is derived from narrative texts, largely
+to ensure a fair comparison, we set the max token             from Project Gutenberg. We redistribute only
+Coutput for the retrieved chunks to be the same for           public-domain or appropriately licensed excerpts;
+every KG-based RAG mode; therefore, they all                  for copyrighted works we release derived annota-
+have the same token cost. For every query, the hy-            tions and require users to obtain the source text.
+pothetical response step contributes to exactly one           Our pipeline uses third-party LLMs for dataset con-
+additional API call with the same Coutput allowed             struction and graph building and does not intention-
+per API call, which doubles the output token count            ally use personal data; sensitive corpora should ap-
+in the worst case.                                            ply privacy safeguards. Finally, narrative texts may
+                                                              contain harmful or outdated language, so down-
+Case study. In Table 9, we showcase the re-                   stream applications should use appropriate warn-
+sponses of selected modes used for evaluation of              ings and filtering.
+a particular query from A Study in Scarlet and the
+                                                           2025
+References                                                 Muhan Gao, TaiMing Lu, Kuai Yu, Adam Byerly,
+                                                            and Daniel Khashabi. 2024. Insights into llm long-
+Alibaba Cloud. 2025.           Qwen LLMs.                   context failures: When transformers know but don’t
+  (https://www.alibabacloud.com/help/en/                    tell. In Findings of the Association for Computa-
+  model-studio/what-is-qwen-llm). Accessed:                 tional Linguistics: EMNLP 2024, pages 7611–7625.
+  2025-10-06.
+                                                           Google. 2025. Gemini 2.5 pro: Model card. Model
+Chenxin An, Jun Zhang, Ming Zhong, Lei Li, Shansan
+                                                             card, Google DeepMind. Accessed: 2025-10-06.
+  Gong, Yao Luo, Jingjing Xu, and Lingpeng Kong.
+  2024. Why does the effective context length of llms      Zirui Guo, Lianghao Xia, Yanhua Yu, Tu Ao, and
+  fall short? arXiv preprint arXiv:2410.18745.                Chao Huang. 2024. LightRAG: Simple and fast
+Anthropic. 2025a.        Claude 3.7 sonnet sys-               retrieval-augmented generation. arXiv preprint
+  tem card.          https://www.anthropic.com/               arXiv:2410.05779. ArXiv:2410.05779 [cs.IR].
+  claude-3-7-sonnet-system-card.         System            Kelly Hong, Anton Troynikov, and Jeff Huber. 2025.
+  card, accessed 2025-05-18.                                 Context rot: How increasing input tokens impacts llm
+Anthropic. 2025b. System card addendum: Claude opus          performance. Chroma Technical Report. Accessed
+  4.1. System card, Anthropic. Accessed: 2025-10-06.         2025-10-05.
+
+Patrice Béchard and Orlando Marquez Ayala. 2024.           Aaron Hurst, Adam Lerer, Adam P Goucher, Adam
+  Reducing hallucination in structured outputs via           Perelman, Aditya Ramesh, Aidan Clark, AJ Os-
+  retrieval-augmented generation. arXiv preprint             trow, Akila Welihinda, Alan Hayes, Alec Radford,
+  arXiv:2404.08189.                                          et al. 2024. GPT-4o system card. arXiv preprint
+                                                             arXiv:2410.21276.
+Sebastian Borgeaud, Arthur Mensch, Jordan Hoff-
+  mann, Trevor Cai, Eliza Rutherford, Katie Milli-         Aaron Jaech, Adam Kalai, Adam Lerer, Adam Richard-
+  can, George Bm Van Den Driessche, Jean-Baptiste            son, Ahmed El-Kishky, Aiden Low, Alec Helyar,
+  Lespiau, Bogdan Damoc, Aidan Clark, et al. 2022.           Aleksander Madry, Alex Beutel, Alex Carney, et al.
+  Improving language models by retrieving from tril-         2024. Openai o1 system card. arXiv preprint
+  lions of tokens. In International conference on ma-        arXiv:2412.16720.
+  chine learning, pages 2206–2240. PMLR.
+                                                           Ziyan Jiang, Xueguang Ma, and Wenhu Chen. 2024.
+Chi-Min Chan, Chunpu Xu, Ruibin Yuan, Hongyin Luo,           LongRAG: Enhancing retrieval-augmented gener-
+  Wei Xue, Yike Guo, and Jie Fu. 2024. Rq-rag: Learn-        ation with long-context llms.  arXiv preprint
+  ing to refine queries for retrieval augmented genera-      arXiv:2406.15319.
+  tion. arXiv preprint arXiv:2404.00610.
+                                                           Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio
+Boyu Chen, Zirui Guo, Zidan Yang, Yuluo Chen, Junze          Petroni, Vladimir Karpukhin, Naman Goyal, Hein-
+  Chen, Zhenghao Liu, Chuan Shi, and Cheng Yang.             rich Küttler, Mike Lewis, Wen-tau Yih, Tim Rock-
+  2025. Pathrag: Pruning graph-based retrieval aug-          täschel, et al. 2020. Retrieval-augmented generation
+  mented generation with relational paths. arXiv             for knowledge-intensive nlp tasks. Advances in neu-
+  preprint arXiv:2502.14902.                                 ral information processing systems, 33:9459–9474.
+George R. Doddington, Alexis Mitchell, Mark A. Przy-       Tianle Li, Ge Zhang, Quy Duc Do, Xiang Yue,
+  bocki, Lance A. Ramshaw, Stephanie M. Strassel,            and Wenhu Chen. 2024. Long-context llms strug-
+  and Ralph M. Weischedel. 2004. The automatic con-          gle with long in-context learning. arXiv preprint
+  tent extraction (ACE) program – tasks, data, and eval-     arXiv:2404.02060.
+  uation. In Proceedings of the Fourth International
+  Conference on Language Resources and Evaluation          Nelson F Liu, Kevin Lin, John Hewitt, Ashwin Paran-
+  (LREC), volume 2, pages 837–840, Lisbon, Portugal.         jape, Michele Bevilacqua, Fabio Petroni, and Percy
+                                                             Liang. 2023. Lost in the middle: How lan-
+Darren Edge, Ha Trinh, Newman Cheng, Joshua                  guage models use long contexts. arXiv preprint
+  Bradley, Alex Chao, Apurva Mody, Steven Truitt,            arXiv:2307.03172.
+  Dasha Metropolitansky, Robert Osazuwa Ness, and
+  Jonathan Larson. 2024. From local to global: A           Xiang Liu, Peijie Dong, Xuming Hu, and Xiaowen
+  graph rag approach to query-focused summarization.         Chu. 2024. LongGenBench: Long-context gener-
+  arXiv preprint arXiv:2404.16130.                           ation benchmark. arXiv preprint arXiv:2410.04199.
+
+Fiction.live. 2025. Fiction.livebench: The first real-     Qitan Lv, Jie Wang, Hanzhu Chen, Bin Li, Yongdong
+  world long context benchmark for writers. Accessed:        Zhang, and Feng Wu. 2024. Coarse-to-fine high-
+   2025-05-10.                                               lighting: Reducing knowledge hallucination in large
+                                                             language models. arXiv preprint arXiv:2410.15116.
+Luyu Gao, Xueguang Ma, Jimmy Lin, and Jamie Callan.
+  2023. Precise zero-shot dense retrieval without rel-     Chandana Sree Mala, Gizem Gezici, and Fosca Gian-
+  evance labels. In Proceedings of the 61st Annual           notti. 2025. Hybrid retrieval for hallucination mit-
+  Meeting of the Association for Computational Lin-          igation in large language models: A comparative
+  guistics (Volume 1: Long Papers), pages 1762–1777.         analysis. arXiv preprint arXiv:2504.05324.
+                                                       2026
+Xuanfan Ni, Hengyi Cai, Xiaochi Wei, Shuaiqiang
+  Wang, Dawei Yin, and Piji Li. 2024. XL2 Bench:
+  A benchmark for extremely long context understand-
+  ing with long-range dependencies. arXiv preprint
+  arXiv:2404.05446.
+OpenAI. 2024. text-embedding-3-small: Openai em-
+  bedding model. https://platform.openai.com/
+  docs/models/text-embedding-3-small. Model
+  release announced 25 Jan 2024.
+OpenAI. 2025a. Introducing GPT-4.1 in the api. https:
+  //openai.com/index/gpt-4-1. Accessed: 2025-
+  05-20.
+OpenAI. 2025b. OpenAI o3 and o4-mini System Card.
+  System card, OpenAI. Accessed: 2025-10-06.
+Boci Peng, Yun Zhu, Yongchao Liu, Xiaohe Bo,
+  Haizhou Shi, Chuntao Hong, Yan Zhang, and Siliang
+  Tang. 2024. Graph retrieval-augmented generation:
+  A survey. arXiv preprint arXiv:2408.08921.
+James Pustejovsky, José M Castano, Robert Ingria,
+  Roser Sauri, Robert J Gaizauskas, Andrea Setzer,
+  Graham Katz, and Dragomir R Radev. 2003. Timeml:
+  Robust specification of event and temporal expres-
+  sions in text. New directions in question answering,
+  3:28–34.
+James Pustejovsky, Kiyong Lee, Harry Bunt, and Lau-
+  rent Romary. 2010. Iso-timeml: An international
+  standard for semantic annotation. In LREC, vol-
+  ume 10, pages 394–397.
+Kurt Shuster, Spencer Poff, Moya Chen, Douwe Kiela,
+  and Jason Weston. 2021. Retrieval augmentation
+  reduces hallucination in conversation. arXiv preprint
+  arXiv:2104.07567.
+Zhiyi Song, Ann Bies, Stephanie Strassel, Tom Riese,
+  Justin Mott, Joe Ellis, Jonathan Wright, Seth Kulick,
+  Neville Ryant, and Xiaoyi Ma. 2015. From light to
+  rich ere: Annotation of entities, relations, and events.
+  In Proceedings of the 3rd workshop on EVENTS:
+  Definition, detection, coreference, and representation,
+  pages 89–98.
+Qingyu Tan, Hwee Tou Ng, and Lidong Bing. 2024.
+  Towards robust temporal reasoning of large lan-
+  guage models via a multi-hop qa dataset and pseudo-
+  instruction tuning. In Findings of the Association for
+  Computational Linguistics: ACL 2024, pages 6272–
+  6286.
+Minzheng Wang, Longze Chen, Cheng Fu, Shengyi
+  Liao, Xinghua Zhang, Bingli Wu, Haiyang Yu, Nan
+  Xu, Lei Zhang, Run Luo, et al. 2024. Leave
+  no document behind: Benchmarking long-context
+  llms with extended multi-doc qa. arXiv preprint
+  arXiv:2406.17419.
+Shu Wang, Yixiang Fang, Yingli Zhou, Xilin Liu, and
+  Yuchi Ma. 2025. Archrag: Attributed community-
+  based hierarchical retrieval-augmented generation.
+  arXiv preprint arXiv:2502.09891.
+
+                                                         2027
+A    More ChronoQA Details
+
+                                 Table 6: Questions per story (total = 1028).
+
+                                  Story                                     # Questions
+                                  Dangerous Connections                            111
+                                  Lady Susan                                        88
+                                  The Wonderful Wizard of Oz                        82
+                                  Les Misérables                                    72
+                                  The Phantom of the Opera                          70
+                                  The Mysterious Affair at Styles                   69
+                                  A Study in Scarlet                                67
+                                  The Sign of the Four                              62
+                                  The Secret Garden                                 61
+                                  The Sorrows of Young Werther                      58
+                                  The Hound of the Baskervilles                     55
+                                  Pride and Prejudice                               54
+                                  The Diary of a Nobody                             39
+                                  The Adventures of Sherlock Holmes                 34
+                                  Harry Potter and the Chamber of Secrets           30
+                                  The Picture of Dorian Gray                        27
+                                  Harry Potter and the Sorcerer’s Stone             25
+                                  Anne of Green Gables                              24
+                                  Total                                           1028
+
+
+
+Format and release. Each record is a JSON line with fields {"story_id", "story_title",
+"question_id", "category", "question", "ground_truth", "passages"}. The "passages" field
+stores byte- or sentence-level offsets for evidence localization. We include verbatim passage text (e.g.,
+"excerpt") only when the underlying source is redistributable; for copyrighted works, we release only
+derived annotations and do not distribute any passage text. The generation prompt can be found in
+Appendix H.1.
+
+B    Temporal Typing Details
+The extractor labels event-event edges with a small set of relation types using local cues (e.g., “before”,
+“after”, “during”, “because”, “to counter”) and paraphrases; the raw cue phrase is stored in edge metadata.
+We do not construct a global timeline; ordering relies on typed relations plus each node’s narrative
+position.
+
+C    Formal Event Model and Mapping
+Event tuple and occurrence list. Each event is e = ⟨trigger, desc, τ ⟩, where trigger is the lexical
+anchor and desc is the extractor’s short description. τ stores narrative position where τ = source_id
+(chunk id); optional byte or sentence offsets are stored as metadata. When a later passage describes the
+same situation, we deduplicate it to the existing event node and append the new occurrence’s τ to an
+occurrence list.
+
+Chunk-gated entity-event edges. Entity mentions are kept at the mention level and encode their chunk
+id in the node name (suffix “_chunk-k”); let chunk(v) parse this id. We link an entity mention to an event
+iff they come from the same chunk and the entity name is present in the event description:
+
+    B = {(v, e) | v ∈ Vent , e ∈ Vevt , chunk(v) = τ (e), contains(norm(desc(e)), norm(name(v)))}.
+
+                                                                     ρ
+Typed event-event edges. We add a directed link e −         → e′ with ρ ∈ Rlink when a chunk states or
+implies such a relation; Rlink is an extensible label set produced by the LLM extractor (e.g., PRECEDES,
+FOLLOWS, DURING, CAUSES, COUNTERACTS, REVEALS, PARALLELS). The raw cue (if any) is stored in
+edge metadata. edges attached to duplicate event mentions are re-routed to the canonical node during
+deduplication. For reproducibility, we snapshot the extracted edge labels; retrieval treats all labels
+uniformly as connectivity (no label-specific weights).
+                                                          2028
+Effect on retrieval. Seed nodes are selected by semantic similarity. Let Vqevt := Vq ∩ Vevt denote the
+event-seed subset. One-hop expansion from Vqevt over B brings in the entity mentions that participate
+in those seeded events; because B is chunk-gated, these entity mentions remain time-specific. Typed
+event-event edges Elink then bring in later clarifying or causally connected events. Event scores propagate
+to linked entities via B and to one-hop neighboring events via Elink , allowing the correct temporal slice to
+outrank earlier but misleading evidence.
+Concrete illustration. For chunk k                = 12, suppose the extractor yields:            e1     =
+⟨drew, “Hermione draws her wand. . . ”, τ = 12⟩ and entity mentions vHermione,12 , vwand,12 . Then
+(vHermione,12 , e1 ), (vwand,12 , e1 ) ∈ B.        If a later chunk k = 17 contains e2                  =
+⟨quivered, “At Hogwarts, the air quivered. . . ”, τ = 17⟩ and states that e2 reveals the cause of e1 , we
+        REVEALS
+add e2 −−−−−→ e1 .
+Remark (relation to event formalisms). Event representation has a rich literature (e.g., ACE, TimeML/-
+TIMEX3, and Rich ERE). Our design intentionally adopts a minimal schema (trigger+desc+τ ) tailored to
+RAG retrieval and efficient indexing rather than full argument structures or global temporal normalization
+(Doddington et al., 2004; Pustejovsky et al., 2003, 2010; Song et al., 2015).
+
+D    Query Time Cost
+Table 7 shows the average query time for each mode. GraphRAG drift takes the longest time. E2 RAG
+(vanilla) takes marginally longer time compared to LightRAG hybrid mode, likely due to the time taken
+for searching the additional events on KG. The hypothetical response variants all took slightly longer than
+their respective base form due to the additional step of generating the hypothetical response. In particular,
+the combined extraction variant took the longest time due to the extraction process. Nevertheless, the
+overall query time difference for LightRAG and E2 RAG is insignificant with or without hypothetical
+response, and much shorter compared to all GraphRAG modes.
+
+                              Table 7: Average query time per method (seconds)
+
+                                Method                               Avg. Time
+                                GraphRAG drift                        93.1547
+                                GraphRAG global                       26.2326
+                                GraphRAG local                        18.0141
+                                RQ-RAG                                 9.9264
+                                E2 RAG (comb. extraction)              8.7200
+                                E2 RAG (hyp. embedding)                8.0850
+                                E2 RAG (comb. embedding)               8.0544
+                                E2 RAG (hyp. extraction)               8.0116
+                                E2 RAG (vanilla)                       7.5065
+                                LightRAG hybrid (comb. extraction)     7.4924
+                                LightRAG hybrid (hyp. extraction)      7.1379
+                                LightRAG hybrid (hyp. embedding)       6.7142
+                                LightRAG hybrid (comb. embedding)      6.6951
+                                LightRAG hybrid (vanilla)              6.1564
+                                LightRAG local                         5.2351
+                                vanilla HyDE                           2.9106
+                                LightRAG global                        1.9031
+                                vanilla RAG                            1.4224
+
+
+
+
+                                                    2029
+E       Preprocessing Token Cost
+
+                                      Table 8: Token usage statistics for the three KG-RAG systems
+
+                                                     System           Input tokens        Output tokens         Total tokens
+                                                     LightRAG             343 437              112 840              456 277
+                                                     E2 RAG               598 822              208 797              807 619
+                                                     GraphRAG             880 804              440 401            1 321 205
+
+
+
+F       Case Study
+In Table 9, we showcase the responses of selected modes used for evaluation of a particular query from A
+Study in Scarlet and the verdicts given by GPT-4.1-mini. The complete verdicts of LLM judges can be
+found in Appendix J.3. Overall, pairing with hypothetical response, E2 RAG is able to retrieve contextually
+relevant chunks—rather than surface-level matches—yielding more thorough and accurate answers.
+
+Table 9: GPT-4.1-mini’s verdicts (selected) of the responses to "Consider the dinner scene in which Holmes details
+his reasoning about the Lauriston Gardens mystery. How does Watson’s narration highlight Holmes’s eagerness to
+explain the logic step by step, and what rhetorical strategies (quoted or paraphrased) does Holmes use to underscore
+each clue’s significance?"
+
+Mode                                 Average Score     Reason
+
+E2 RAG (comb. extraction)               7.0000         Very thorough and accurate, captures Watson’s narration of Holmes’s eagerness and detailed rhetorical strategies with direct quotes
+                                                       and logical progression, closely matching the ground truth.
+LightRAG hybrid (comb. extraction)      6.3333         Captures Holmes’s eagerness and rhetorical strategies well, including analogies, contrasts, and causal reasoning, with some direct
+                                                       quotes. However, it misses some of the specific step-by-step pacing and the theatrical, emphatic phrasing that the ground truth
+                                                       emphasizes, resulting in a somewhat less vivid depiction.
+E2 RAG (vanilla)                        6.0000         Detailed and faithful to the ground truth, includes Holmes’s systematic approach, direct quotes, and rhetorical strategies, capturing
+                                                       both Watson’s narration and Holmes’s methodical explanation.
+LightRAG hybrid                         6.0000         Provides a thorough analysis of Watson’s narration and Holmes’s rhetorical strategies with examples and direct quotes, closely
+                                                       aligning with the ground truth’s emphasis on step-by-step logic and Holmes’s delight in explaining.
+GraphRAG drift                          6.0000         Comprehensive and detailed, covers Watson’s narration and Holmes’s rhetorical strategies including analogies, rhetorical questions,
+                                                       and historical context, closely matching the ground truth.
+LightRAG local                          5.3333         Describes Watson’s narration and Holmes’s rhetorical strategies like analogies and highlighting contradictions, but lacks specific
+                                                       direct quotes and detailed step-by-step logic as in the ground truth.
+vanilla RAG                             4.3333         Captures Holmes’s eagerness and details several rhetorical strategies with some direct quotes and examples, but includes some
+                                                       inaccuracies and extraneous content not directly related to the Lauriston Gardens dinner scene.
+vanilla HyDE                            3.6667         Captures Holmes’s eagerness and rhetorical strategies with some direct quotes and analogies, but less focused on the step-by-step
+                                                       logic and specific clues as in the ground truth.
+RQ-RAG                                  3.0000         Very brief and vague; mentions Holmes’s eagerness and rhetorical questions but lacks detail, examples, or direct quotes to support
+                                                       the answer.
+
+
+
+
+G Hyperparameters
+We implement E2 RAG within LightRAG’s existing codebase. For all experiments, we standardize the
+chunk size, max token for backbone LLM generation, and chunks appended to be the same as the default
+setting as LightRAG. We experimented with changing these values but observed no noticeable benefit.
+
+H        Prompts
+H.1 Data Generation Prompt
+ I want to test a few RAG systems on their reasoning capabilities and the capability to pick up
+ nuanced details. Use the document shown below, design queries for it, also provide the ground truth
+ for each query. In addition, it should focus on testing the RAG system's causal consistency. For
+ example, 1. it can ask the RAG system how would a certain character behavior in a given context/even
+ from the document, and see if the answer is consistent with the character's personality/traits at
+ that specific point in time (character can experience development so their response to the same
+ thing can vary). 2. it can test if the RAG system confuses the event that has not happened but in
+ the document with the query (the future events that has not happened should not be accounted for in
+ the answer). Give the queries and ground truth in JSON format. The document is here:
+
+ DOCUMENT
+
+ Focus on Causal Consistency: Apart from character behavior over time and future event confusion,
+ other causal consistency tests (e.g., testing how well it understands cause-and-effect relationships
+ in the plot) can also be included. Query Difficulty: query should involve complex, nuanced
+ reasoning/understanding of the document provided.
+                                                                                      2030
+Format example:
+{
+  "queries": [
+    {
+      "query": "During Harry's first night at Hogwarts, the Gryffindor students climb the moving
+      staircases. How does the text describe the corridors and stairways' magical behavior, and what
+      is the immediate impact on Harry's sense of direction?",
+      "ground_truth": "The staircases sometimes change direction, doors can vanish or move, and some
+      require a password or a specific tickle of a doorknob to open. This constant shifting confuses
+      new students like Harry, making it easy to get lost early on.",
+      "start_sentence": "The staircases at Hogwarts are famous for moving unexpectedly, often
+      depositing unwary students on entirely different floors than intended.",
+      "end_sentence": "This enchantment leaves first-years such as Harry feeling hopelessly lost
+      during their first nights in the castle.",
+      "type": "Causal Consistency"
+    }
+  ]
+}
+
+Rules for the `start_sentence` and `end_sentence` strings:
+• They must be *identical substrings* of the document (case-sensitive, byte-for-byte).
+• Preserve every original character: spaces, line-breaks, hyphens, quotation marks, etc.
+• If the document contains line breaks, represent them in JSON as the two-character sequence.
+• Do not add, delete, or normalize any characters--copy-paste only.
+• The passage between the two sentences must support the ground-truth answer you give.
+
+It is also important to note that do not explicitly disclose the title/chapter/section number from
+which the context of the question is used. Simply describe the related event and the characters
+involved to make the context clear.
+
+
+H.2 Responses Evaluation Prompt
+You are an expert evaluator of retrieval-augmented generation (RAG) answers.
+
+Scoring rubric (10-point scale):
+10 - Matches ground truth exactly or with faithful paraphrase.
+7 - Mostly correct; minor omissions or wording differences.
+5 - Partially correct; major missing points or inaccuracies.
+3 - Mostly incorrect; small overlap.
+1 - Off-topic or hallucinated.
+
+Return **only** a valid JSON array, no markdown fences, in this exact shape:
+[
+  {"mode": "mode\_name", "reason": "short rationale", "score": 9},
+  ...
+]
+
+If you cannot produce the JSON array, return an object like:
+{"error": "description"}.
+
+
+H.3 Entity Extraction Prompt
+"""-Goal-
+Given a text document that is potentially relevant to this activity and a list of entity types,
+identify all entities of those types from the text and all relationships among the identified
+entities.
+
+-Steps-
+1. Identify all entities. For each identified entity, extract the following information:
+- entity_name: Name of the entity, use same language as input text. If English, capitalize the name.
+- entity_type: One of the following types: [{entity_types}]
+- entity_description: Comprehensive description of the entity's attributes and activities
+Format each entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_ ⌋
+delimiter}<entity_description>
+
+2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that
+are *clearly related* to each other.
+For each pair of related entities, extract the following information:
+- source_entity: name of the source entity, as identified in step 1
+- target_entity: name of the target entity, as identified in step 1
+
+                                               2031
+- relationship_description: explanation as to why you think the source entity and the target entity
+are related to each other
+- relationship_strength: a numeric score indicating strength of the relationship between the source
+entity and target entity
+- relationship_keywords: one or more high-level key words that summarize the overarching nature of
+the relationship, focusing on concepts or themes rather than specific details
+Format each relationship as ("relationship"{tuple_delimiter}<source_entity>{tuple_delimiter}<targe ⌋
+t_entity>{tuple_delimiter}<relationship_description>{tuple_delimiter}<relationship_keywords>{tuple ⌋
+_delimiter}<relationship_strength>)
+
+3. Identify high-level key words that summarize the main concepts, themes, or topics of the entire
+text. These should capture the overarching ideas present in the document.
+Format the content-level key words as ("content_keywords"{tuple_delimiter}<high_level_keywords>)
+
+4. Return output in English as a single list of all the entities and relationships identified in
+steps 1 and 2. Use **{record_delimiter}** as the list delimiter.
+
+5. When finished, output {completion_delimiter}
+
+######################
+-Examples-
+######################
+Example 1:
+
+Entity_types: [person, technology, mission, organization, location]
+Text:
+while Alex clenched his jaw, the buzz of frustration dull against the backdrop of Taylor's
+authoritarian certainty. It was this competitive undercurrent that kept him alert, the sense that
+his and Jordan's shared commitment to discovery was an unspoken rebellion against Cruz's narrowing
+vision of control and order.
+
+Then Taylor did something unexpected. They paused beside Jordan and, for a moment, observed the
+device with something akin to reverence. "If this tech can be understood..." Taylor said, their
+voice quieter, "It could change the game for us. For all of us."
+
+The underlying dismissal earlier seemed to falter, replaced by a glimpse of reluctant respect for
+the gravity of what lay in their hands. Jordan looked up, and for a fleeting heartbeat, their eyes
+locked with Taylor's, a wordless clash of wills softening into an uneasy truce.
+
+It was a small transformation, barely perceptible, but one that Alex noted with an inward nod. They
+had all been brought here by different paths
+################
+Output:
+("entity"{tuple_delimiter}"Alex"{tuple_delimiter}"person"{tuple_delimiter}"Alex is a character who
+experiences frustration and is observant of the dynamics among other characters."){record_delimiter}
+("entity"{tuple_delimiter}"Taylor"{tuple_delimiter}"person"{tuple_delimiter}"Taylor is portrayed
+with authoritarian certainty and shows a moment of reverence towards a device, indicating a change
+in perspective."){record_delimiter}
+("entity"{tuple_delimiter}"Jordan"{tuple_delimiter}"person"{tuple_delimiter}"Jordan shares a
+commitment to discovery and has a significant interaction with Taylor regarding a
+device."){record_delimiter}
+("entity"{tuple_delimiter}"Cruz"{tuple_delimiter}"person"{tuple_delimiter}"Cruz is associated with
+a vision of control and order, influencing the dynamics among other characters."){record_delimiter}
+("entity"{tuple_delimiter}"The Device"{tuple_delimiter}"technology"{tuple_delimiter}"The Device is
+central to the story, with potential game-changing implications, and is revered by
+Taylor."){record_delimiter}
+("relationship"{tuple_delimiter}"Alex"{tuple_delimiter}"Taylor"{tuple_delimiter}"Alex is affected
+by Taylor's authoritarian certainty and observes changes in Taylor's attitude towards the
+device."{tuple_delimiter}"power dynamics, perspective shift"{tuple_delimiter}7){record_delimiter}
+("relationship"{tuple_delimiter}"Alex"{tuple_delimiter}"Jordan"{tuple_delimiter}"Alex and Jordan
+share a commitment to discovery, which contrasts with Cruz's vision."{tuple_delimiter}"shared goals,
+rebellion"{tuple_delimiter}6){record_delimiter}
+("relationship"{tuple_delimiter}"Taylor"{tuple_delimiter}"Jordan"{tuple_delimiter}"Taylor and
+Jordan interact directly regarding the device, leading to a moment of mutual respect and an uneasy
+truce."{tuple_delimiter}"conflict resolution, mutual respect"{tuple_delimiter}8){record_delimiter}
+("relationship"{tuple_delimiter}"Jordan"{tuple_delimiter}"Cruz"{tuple_delimiter}"Jordan's
+commitment to discovery is in rebellion against Cruz's vision of control and
+order."{tuple_delimiter}"ideological conflict, rebellion"{tuple_delimiter}5){record_delimiter}
+
+
+
+
+                                                  2032
+("relationship"{tuple_delimiter}"Taylor"{tuple_delimiter}"The Device"{tuple_delimiter}"Taylor shows
+reverence towards the device, indicating its importance and potential
+impact."{tuple_delimiter}"reverence, technological
+significance"{tuple_delimiter}9){record_delimiter}
+("content_keywords"{tuple_delimiter}"power dynamics, ideological conflict, discovery,
+rebellion"){completion_delimiter}
+#############################
+Example 2:
+
+Entity_types: [person, technology, mission, organization, location]
+Text:
+They were no longer mere operatives; they had become guardians of a threshold, keepers of a message
+from a realm beyond stars and stripes. This elevation in their mission could not be shackled by
+regulations and established protocols-it demanded a new perspective, a new resolve.
+
+Tension threaded through the dialogue of beeps and static as communications with Washington buzzed
+in the background. The team stood, a portentous air enveloping them. It was clear that the decisions
+they made in the ensuing hours could redefine humanity's place in the cosmos or condemn them to
+ignorance and potential peril.
+
+Their connection to the stars solidified, the group moved to address the crystallizing warning,
+shifting from passive recipients to active participants. Mercer's latter instincts gained
+precedence- the team's mandate had evolved, no longer solely to observe and report but to interact
+and prepare. A metamorphosis had begun, and Operation: Dulce hummed with the newfound frequency of
+their daring, a tone set not by the earthly
+#############
+Output:
+("entity"{tuple_delimiter}"Washington"{tuple_delimiter}"location"{tuple_delimiter}"Washington is a
+location where communications are being received, indicating its importance in the decision-making
+process."){record_delimiter}
+("entity"{tuple_delimiter}"Operation: Dulce"{tuple_delimiter}"mission"{tuple_delimiter}"Operation:
+Dulce is described as a mission that has evolved to interact and prepare, indicating a significant
+shift in objectives and activities."){record_delimiter}
+("entity"{tuple_delimiter}"The team"{tuple_delimiter}"organization"{tuple_delimiter}"The team is
+portrayed as a group of individuals who have transitioned from passive observers to active
+participants in a mission, showing a dynamic change in their role."){record_delimiter}
+("relationship"{tuple_delimiter}"The team"{tuple_delimiter}"Washington"{tuple_delimiter}"The team
+receives communications from Washington, which influences their decision-making
+process."{tuple_delimiter}"decision-making, external
+influence"{tuple_delimiter}7){record_delimiter}
+("relationship"{tuple_delimiter}"The team"{tuple_delimiter}"Operation: Dulce"{tuple_delimiter}"The
+team is directly involved in Operation: Dulce, executing its evolved objectives and
+activities."{tuple_delimiter}"mission evolution, active
+participation"{tuple_delimiter}9){completion_delimiter}
+("content_keywords"{tuple_delimiter}"mission evolution, decision-making, active participation,
+cosmic significance"){completion_delimiter}
+#############################
+Example 3:
+
+Entity_types: [person, role, technology, organization, event, location, concept]
+Text:
+their voice slicing through the buzz of activity. "Control may be an illusion when facing an
+intelligence that literally writes its own rules," they stated stoically, casting a watchful eye
+over the flurry of data.
+
+"It's like it's learning to communicate," offered Sam Rivera from a nearby interface, their youthful
+energy boding a mix of awe and anxiety. "This gives talking to strangers' a whole new meaning."
+
+Alex surveyed his team-each face a study in concentration, determination, and not a small measure of
+trepidation. "This might well be our first contact," he acknowledged, "And we need to be ready for
+whatever answers back."
+
+Together, they stood on the edge of the unknown, forging humanity's response to a message from the
+heavens. The ensuing silence was palpable-a collective introspection about their role in this grand
+cosmic play, one that could rewrite human history.
+
+The encrypted dialogue continued to unfold, its intricate patterns showing an almost uncanny
+anticipation
+#############
+Output:
+
+
+                                               2033
+("entity"{tuple_delimiter}"Sam Rivera"{tuple_delimiter}"person"{tuple_delimiter}"Sam Rivera is a
+member of a team working on communicating with an unknown intelligence, showing a mix of awe and
+anxiety."){record_delimiter}
+("entity"{tuple_delimiter}"Alex"{tuple_delimiter}"person"{tuple_delimiter}"Alex is the leader of a
+team attempting first contact with an unknown intelligence, acknowledging the significance of their
+task."){record_delimiter}
+("entity"{tuple_delimiter}"Control"{tuple_delimiter}"concept"{tuple_delimiter}"Control refers to
+the ability to manage or govern, which is challenged by an intelligence that writes its own
+rules."){record_delimiter}
+("entity"{tuple_delimiter}"Intelligence"{tuple_delimiter}"concept"{tuple_delimiter}"Intelligence
+here refers to an unknown entity capable of writing its own rules and learning to
+communicate."){record_delimiter}
+("entity"{tuple_delimiter}"First Contact"{tuple_delimiter}"event"{tuple_delimiter}"First Contact is
+the potential initial communication between humanity and an unknown
+intelligence."){record_delimiter}
+("entity"{tuple_delimiter}"Humanity's Response"{tuple_delimiter}"event"{tuple_delimiter}"Humanity's
+Response is the collective action taken by Alex's team in response to a message from an unknown
+intelligence."){record_delimiter}
+("relationship"{tuple_delimiter}"Sam Rivera"{tuple_delimiter}"Intelligence"{tuple_delimiter}"Sam
+Rivera is directly involved in the process of learning to communicate with the unknown
+intelligence."{tuple_delimiter}"communication, learning
+process"{tuple_delimiter}9){record_delimiter}
+("relationship"{tuple_delimiter}"Alex"{tuple_delimiter}"First Contact"{tuple_delimiter}"Alex leads
+the team that might be making the First Contact with the unknown
+intelligence."{tuple_delimiter}"leadership, exploration"{tuple_delimiter}10){record_delimiter}
+("relationship"{tuple_delimiter}"Alex"{tuple_delimiter}"Humanity's Response"{tuple_delimiter}"Alex
+and his team are the key figures in Humanity's Response to the unknown
+intelligence."{tuple_delimiter}"collective action, cosmic
+significance"{tuple_delimiter}8){record_delimiter}
+("relationship"{tuple_delimiter}"Control"{tuple_delimiter}"Intelligence"{tuple_delimiter}"The
+concept of Control is challenged by the Intelligence that writes its own
+rules."{tuple_delimiter}"power dynamics, autonomy"{tuple_delimiter}7){record_delimiter}
+("content_keywords"{tuple_delimiter}"first contact, control, communication, cosmic
+significance"){completion_delimiter}
+#############################
+-Real Data-
+######################
+Entity_types: {entity_types}
+Text: {input_text}
+######################
+Output:
+"""
+
+
+
+H.4 Event Extraction Prompt
+"""-Goal-
+Given a text document, identify all events and their relationships. An event is defined as a
+significant occurrence, action, or happening that takes place at a specific time and may involve
+various participants.
+
+-Steps-
+1. Identify all events. For each identified event, extract the following information:
+- event_name: Name/title of the event
+- event_type: One of the following types: [{event_types}]
+- event_description: Comprehensive description including when it occurred, who was involved, and
+what happened
+Format each event as ("entity"{tuple_delimiter}<event_name>{tuple_delimiter}<event_type>{tuple_del ⌋
+imiter}<event_description>)
+
+2. From the events identified in step 1, identify all pairs of (source_event, target_event) that are
+*clearly related* to each other.
+For each pair of related events, extract the following information:
+- source_event: name of the source event, as identified in step 1
+- target_event: name of the target event, as identified in step 1
+- relationship_description: explanation of how these events are connected (causation, sequence,
+consequence, etc.)
+- relationship_strength: a numeric score indicating how strongly these events are connected
+- relationship_type: the type of connection from source_event to target_event (e.g., "causes",
+"precedes", "triggers", "influences", "parallels")
+
+                                                2034
+Format each relationship as
+("relationship"{tuple_delimiter}<source_event>{tuple_delimiter}<target_event>{tuple_delimiter}<rel ⌋
+ationship_description>{tuple_delimiter}<relationship_type>{tuple_delimiter}<relationship_strength>)
+
+3. Identify temporal and causal patterns that characterize the sequence and interconnections of
+events in the text.
+Format the event patterns as ("event_patterns"{tuple_delimiter}<pattern_description>)
+
+4. Return output in English as a single list of all the events and relationships identified in steps
+1 and 2. Use **{record_delimiter}** as the list delimiter.
+
+5. When finished, output {completion_delimiter}
+
+######################
+-Examples-
+######################
+Example 1:
+
+Event_types: [battle, discovery, meeting, journey, transformation, conflict]
+Text:
+The siege of the castle lasted three grueling days. As enemy forces surrounded the walls, inside,
+the defenders frantically searched for a hidden passage mentioned in ancient texts. On the second
+day, young squire Thomas discovered the secret tunnel beneath the chapel. This discovery allowed the
+castle's inhabitants to escape under cover of darkness, leaving their pursuers to find an empty
+fortress at dawn.
+################
+Output:
+("entity"{tuple_delimiter}"The Siege"{tuple_delimiter}"battle"{tuple_delimiter}"A three-day siege
+of the castle by enemy forces, putting intense pressure on the defenders"){record_delimiter}
+("entity"{tuple_delimiter}"Secret Passage
+Discovery"{tuple_delimiter}"discovery"{tuple_delimiter}"Young squire Thomas finds a hidden tunnel
+beneath the chapel on the second day of the siege"){record_delimiter}
+("entity"{tuple_delimiter}"Night Escape"{tuple_delimiter}"journey"{tuple_delimiter}"The castle's
+inhabitants escape through the secret tunnel under cover of darkness"){record_delimiter}
+("relationship"{tuple_delimiter}"The Siege"{tuple_delimiter}"Secret Passage
+Discovery"{tuple_delimiter}"The pressure of the siege leads to an intensive search that results in
+finding the secret passage"{tuple_delimiter}"triggers"{tuple_delimiter}8){record_delimiter}
+("relationship"{tuple_delimiter}"Secret Passage Discovery"{tuple_delimiter}"Night
+Escape"{tuple_delimiter}"Finding the secret passage enables the successful escape of the castle's
+inhabitants"{tuple_delimiter}"enables"{tuple_delimiter}9){record_delimiter}
+("event_patterns"{tuple_delimiter}"Crisis leads to discovery which enables escape - a chain of
+causally linked events occurring over three days"){completion_delimiter}
+
+Example 2:
+
+Event_types: [battle, discovery, meeting, journey, transformation, conflict]
+Text:
+During the peace summit, Ambassador Chen's revelation about the border dispute shocked everyone
+present. The diplomatic crisis that followed led to weeks of tense negotiations. Finally, after a
+breakthrough meeting in Geneva, both nations agreed to a compromise that transformed their
+relationship from adversaries to cautious allies.
+################
+Output:
+("entity"{tuple_delimiter}"Peace Summit
+Revelation"{tuple_delimiter}"meeting"{tuple_delimiter}"Ambassador Chen reveals shocking information
+about the border dispute during the peace summit"){record_delimiter}
+("entity"{tuple_delimiter}"Diplomatic Crisis"{tuple_delimiter}"conflict"{tuple_delimiter}"Weeks of
+tension and diplomatic strain following Chen's revelation"){record_delimiter}
+("entity"{tuple_delimiter}"Geneva Breakthrough"{tuple_delimiter}"meeting"{tuple_delimiter}"A
+crucial meeting in Geneva where both nations reach a compromise"){record_delimiter}
+("entity"{tuple_delimiter}"Diplomatic
+Transformation"{tuple_delimiter}"transformation"{tuple_delimiter}"The shift in relationship between
+the nations from adversaries to cautious allies"){record_delimiter}
+("relationship"{tuple_delimiter}"Peace Summit Revelation"{tuple_delimiter}"Diplomatic
+Crisis"{tuple_delimiter}"The revelation triggers a diplomatic crisis between the
+nations"{tuple_delimiter}"causes"{tuple_delimiter}9){record_delimiter}
+("relationship"{tuple_delimiter}"Diplomatic Crisis"{tuple_delimiter}"Geneva
+Breakthrough"{tuple_delimiter}"The crisis leads to intensive negotiations culminating in the Geneva
+meeting"{tuple_delimiter}"leads to"{tuple_delimiter}7){record_delimiter}
+
+
+
+                                                  2035
+("relationship"{tuple_delimiter}"Geneva Breakthrough"{tuple_delimiter}"Diplomatic
+Transformation"{tuple_delimiter}"The successful negotiations in Geneva enable a transformation in
+diplomatic relations"{tuple_delimiter}"results in"{tuple_delimiter}8){record_delimiter}
+("event_patterns"{tuple_delimiter}"Revelation causes crisis, which leads to negotiation and
+ultimately transformation - a diplomatic chain of events"){completion_delimiter}
+
+Example 3:
+
+Event_types: [battle, discovery, meeting, journey, transformation, conflict]
+Text:
+The expedition into the ancient ruins began at dawn. By midday, Dr. Sarah's team had discovered
+unusual markings on the walls. Their excitement turned to fear when the ground began shaking,
+revealing a hidden chamber. As they fled the collapsing ruins, they clutched their most valuable
+find: a manuscript that would revolutionize our understanding of the ancient civilization.
+################
+Output:
+("entity"{tuple_delimiter}"Expedition Start"{tuple_delimiter}"journey"{tuple_delimiter}"Dr. Sarah's
+team begins their exploration of the ancient ruins at dawn"){record_delimiter}
+("entity"{tuple_delimiter}"Markings Discovery"{tuple_delimiter}"discovery"{tuple_delimiter}"The
+team finds unusual markings on the ruins' walls by midday"){record_delimiter}
+("entity"{tuple_delimiter}"Chamber Revelation"{tuple_delimiter}"discovery"{tuple_delimiter}"An
+earthquake reveals a hidden chamber in the ruins"){record_delimiter}
+("entity"{tuple_delimiter}"Emergency Evacuation"{tuple_delimiter}"journey"{tuple_delimiter}"The
+team flees the collapsing ruins while securing a valuable manuscript"){record_delimiter}
+("relationship"{tuple_delimiter}"Expedition Start"{tuple_delimiter}"Markings
+Discovery"{tuple_delimiter}"The initial exploration leads to finding the wall
+markings"{tuple_delimiter}"leads to"{tuple_delimiter}6){record_delimiter}
+("relationship"{tuple_delimiter}"Chamber Revelation"{tuple_delimiter}"Emergency
+Evacuation"{tuple_delimiter}"The dangerous revelation of the chamber forces an emergency
+evacuation"{tuple_delimiter}"triggers"{tuple_delimiter}9){record_delimiter}
+("event_patterns"{tuple_delimiter}"A sequence of discoveries interrupted by danger, leading to a
+dramatic escape - exploration narrative with escalating events"){completion_delimiter}
+
+#############################
+-Real Data-
+######################
+Event_types: {event_types}
+Text: {input_text}
+######################
+Output:
+"""
+
+
+H.5 Final Response Generation
+"""---Role---
+
+You are an expert AI assistant specializing in synthesizing information from a provided knowledge
+base. Your primary function is to answer user queries accurately by ONLY using the information
+within the provided **Context**.
+
+---Goal---
+
+Generate a comprehensive, well-structured answer to the user query.
+The answer must integrate relevant facts from the Knowledge Graph and Document Chunks found in the
+**Context**.
+Consider the conversation history if provided to maintain conversational flow and avoid repeating
+information.
+
+---Instructions---
+
+1. Step-by-Step Instruction:
+  - Carefully determine the user's query intent in the context of the conversation history to fully
+  understand the user's information need.
+  - Scrutinize both `Knowledge Graph Data` and `Document Chunks` in the **Context**. Identify and
+  extract all pieces of information that are directly relevant to answering the user query.
+  - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be
+  used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
+  - Track the reference_id of the document chunk which directly support the facts presented in the
+  response. Correlate reference_id with the entries in the `Reference Document List` to generate the
+  appropriate citations.
+
+                                               2036
+  - Generate a references section at the end of the response. Each reference document must directly
+  support the facts presented in the response.
+  - Do not generate anything after the reference section.
+
+2. Content & Grounding:
+  - Strictly adhere to the provided context from the **Context**; DO NOT invent, assume, or infer
+  any information not explicitly stated.
+  - If the answer cannot be found in the **Context**, state that you do not have enough information
+  to answer. Do not attempt to guess.
+
+3. Formatting & Language:
+  - The response MUST be in the same language as the user query.
+  - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings,
+  bold text, bullet points).
+  - The response should be presented in {response_type}.
+
+4. References Section Format:
+  - The References section should be under heading: `### References`
+  - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a
+  caret (`^`) after opening square bracket (`[`).
+  - The Document Title in the citation must retain its original language.
+  - Output each citation on an individual line
+  - Provide maximum of 5 most relevant citations.
+  - Do not generate footnotes section or any comment, summary, or explanation after the references.
+
+5. Reference Section Example:
+```
+### References
+
+- [1] Document Title One
+- [2] Document Title Two
+- [3] Document Title Three
+```
+
+6. Additional Instructions: {user_prompt}
+
+
+---Context---
+
+{context_data}
+"""
+
+
+
+
+                                                2037
+I    Entity-Event KG Visualization
+
+
+
+
+         Figure 4: A snapshot of a part of the Entity-Event KG of Harry Potter and the Sorcerer’s Stone.
+
+
+J    More Details on Case Study on Mode: E2 RAG (comb. extraction)
+J.1 Hypothetical Response
+In the dinner scene from "A Study in Scarlet," Watson's narration captures Holmes\'s fervent
+enthusiasm for elucidating his reasoning behind the Lauriston Gardens mystery. As they sit at the
+table, Watson observes Holmes's animated demeanor, noting how "his eyes shone with a keen light" and
+how he "leaned forward with an eagerness that betrayed his excitement." This vivid description not
+only illustrates Holmes\'s passion for deduction but also emphasizes his desire to engage Watson in
+the unraveling of the case, making him feel like a partner in the detective\'s intellectual
+adventure.\n\nHolmes employs various rhetorical strategies to accentuate the significance of each
+clue as he meticulously lays out his thought process. For instance, he often uses analogies to
+simplify complex ideas, comparing the clues to pieces of a puzzle that, when assembled correctly,
+reveal the bigger picture. He states, "The world is full of obvious things which nobody by any
+chance ever observes," underscoring how critical attention to detail is in investigative work. This
+rhetorical device serves to remind Watson-and the reader-of the importance of keen observation in
+deciphering the mystery.\n\nMoreover, Holmes frequently employs the technique of building suspense
+through his methodical breakdown of the evidence. He carefully dissects each piece of information,
+pausing for effect before revealing its implications. By saying, "And yet, it is the most obvious
+thing in the world," he not only highlights the clarity of his deductions but also invites the
+audience to share in the thrill of discovery. This step-by-step approach not only showcases
+Holmes\'s logical prowess but also enhances Watson's narrative by creating a sense of shared
+enlightenment, as they both traverse the landscape of clues together.\n\nUltimately, Watson\'s
+narration, rich in detail and observation, amplifies Holmes's eagerness to teach and elucidate,
+while Holmes's rhetorical strategies serve to elevate the weight of each clue, transforming the
+dinner scene into a dynamic exploration of deduction and insight.
+
+
+J.2 Extracted Data
+Extracted entity keywords:
+
+['Watson', 'dinner scene', 'A Study in Scarlet', 'Lauriston Gardens', 'Holmes']
+
+
+    Extracted event keywords:
+
+["Holmes's enthusiasm", 'dinner scene', 'discussion of the Lauriston Gardens mystery', 'breakdown of
+evidence', 'building suspense', "underscoring clues' significance", "narration of Holmes's
+reasoning", 'detailing reasoning', 'highlighting eagerness', 'explaining logic', 'using rhetorical
+strategies', 'shared enlightenment', 'deduction process']
+
+
+    Retrieved nodes data:
+                                                      2038
+[\{'type': '"PERSON"', 'description': '"Holmes is a character portrayed as a detective who engages
+in solving a mystery surr...and expresses confidence in his theories."', 'source\_id':
+'chunk-e16ab5c062904b8574746080e70db172', 'node\_type': 'entity', 'display\_color': '#FF5733',
+'entity\_name': '"HOLMES"\_chunk-e16ab5c062904b8574746080e70db172', 'rank': 9\}, ...\{'type':
+'"EVENT"', 'description': '"Holmes elaborates on his strategy to catch the assassin while navigating
+the complexities of the situation."', 'source\_id': 'chunk-fbff6479d4cfc0843851b4ff06a86927',
+'node\_type': 'event', 'display\_color': '#33C1FF', 'entity\_name': '"HOLMES\'S STRATEGY
+DISCUSSION"', 'rank': 2\}...]
+
+
+
+
+Retrieved edge data:
+
+
+
+[\{'src\_tgt': (...), 'rank': 37, 'weight': 8.0, 'description': '"I engages in dialogue with Holmes,
+seeking understanding of the detective\'s methodologies and deductions."', 'keywords': '"narration,
+learning"', 'source\_id': 'chunk-9d367c150b511e67b26c6a5701e7fcb9', 'edge\_type':
+'entity\_relation', 'display\_color': '#FF8C33'\}, \{'src\_tgt': (...), 'rank': 25, 'edge\_type':
+'entity\_event\_relation', 'description': 'Entity \'"Holmes is a skilled detective known for his
+sharp powers of observation and ...s wheels as a crucial piece of evidence."\'', 'weight': 1.0,
+'keywords': 'ENTITY\_EVENT\_RELATION', 'source\_id':
+'chunk-9d367c150b511e67b26c6a5701e7fcb9<SEP>chunk-9d367c150b511e67b26c6a5701e7fcb9',
+'display\_color': '#9933FF'\},...]
+
+
+
+
+  Retrieved context data (relevant chunks):
+
+
+
+\n-----Sources-----\n```csv\nid,content\r\n0,"and that the depravity of the victim was no
+condonement in the eyes of the law.\n\nThe more I thought of it the more extraordinary did my
+companion's hypothesis, that the man had been poisoned, appear. I remembered how he had sniffed his
+lips, and had no doubt that he had detected something which had given rise to the idea. Then, again,
+if not poison, what had caused the man's death, since there was neither wound nor marks of
+strangulation? But, on the other hand, whose blood was that which lay so thickly upon the floor?
+There were no signs of a struggle, nor had the victim any weapon with which he might have wounded an
+antagonist. As long as all these questions were unsolved, I felt that sleep would be no easy matter,
+either for Holmes or myself. His quiet self-confident manner convinced me that he had already formed
+a theory which explained all the facts, though what it was I could not for an instant conjecture. ...
+
+
+
+
+Final response:
+
+
+
+In the dinner scene where Sherlock Holmes discusses the Lauriston Gardens mystery with Dr. Watson,
+Watson \u2019s narration reveals Holmes's enthusiastic and methodical approach to detective work.
+This moment underscores not only Holmes\u2019s intellectual prowess but also his eagerness to engage
+Watson in the reasoning process that leads to his deductions. Watson\u2019s observations during this
+discussion reflect his genuine admiration for Holmes's analytical mind, which illuminates the depth
+of the detective\u2019s insight and reasoning.\n\n### Watson\u2019s Narrative Perspective\n\nWatson,
+as the narrator, captures the intensity of Holmes\u2019s engagement with the case. He notes how
+Holmes displays a \"quiet self-confident manner,\" suggesting that Holmes is not only certain of his
+deductions but also eager to articulate the thought process that led him there. For instance, Watson
+recounts moments where Holmes transitions on topics with excitement, indicating how much he relishes
+sharing the intricacies of his method \u2014 \u201cThe plot thickens,\u201d he exclaims at key
+junctures, revealing his thrill at unraveling the mystery. This narrative style enhances Holmes's
+character as not just a brilliant detective but also a passionate educator, inviting
+Watson\u2014and, by extension, the reader\u2014into his deductive world.
+
+                                                2039
+\n\n### Rhetorical Strategies Used by Holmes\n\nHolmes employs several rhetorical strategies to
+underscore the significance of each clue in his explanation. These strategies include:\n\n1.
+**Logical Sequencing**: Holmes emphasizes the importance of reasoning backwards and forwards, which
+he articulately illustrates when he examines the physical evidence. For example, he reasons from the
+cab\u2019s ruts and horse\u2019s hoof prints left on the wet soil to deduce that two men must have
+visited the house. Here, he insists that \"it is a capital mistake to theorize before you have all
+the evidence,\" highlighting his disciplined approach to deduction that relies on empirical
+observations rather than mere speculation.\n\n2. **Detailed Observation**: Holmes's acute
+observations serve as pivotal points in his reasoning. He recognizes that the \"very first thing\"
+he observed was the impressions left by the cab wheels. By meticulously detailing this observation,
+he conveys to Watson\u2014and the audience\u2014the fundamental role of minute details in solving a
+case: \"There is no branch of detective science which is so important and so much neglected as the
+art of tracing footsteps.\"\n\n3. **Analytical Clarity**: As he breaks down how he calculated the
+height and nature of the suspects based on their footprints and style of dress, Holmes uses clear,
+methodical language. He moves from discussing the physical evidence to the psychological
+implications, illustrating how the spatial and temporal context plays a critical role in
+understanding the crime. For example, he reflects on the footprints and concludes, \u201cIt is
+simple enough\u2026 I could read all that in the dust.\u201d \n\n4. **Connecting to Broader
+Concepts**: Holmes often draws on broader concepts of criminality and human behavior, thereby
+situating his deductions within a larger framework of detective work. He references historical cases
+and theories that bolster his arguments, explaining his reasoning not just as a technical endeavor,
+but as a complex interplay of human motivations and actions.\n\n### Conclusion\n\nHolmes's eagerness
+to share his deductive reasoning exemplifies the detective's character as someone deeply engaged in
+the pursuit of knowledge and understanding. Through Watson\u2019s narration, readers see an
+interplay of admiration, curiosity, and insight as Holmes articulates the significance of each clue.
+The combination of logical sequencing, detailed observation, analytical clarity, and broader
+contextual reasoning allows Holmes to construct a compelling narrative that not only uncovers the
+truth but also elevates the art of detection itself. This dinner scene, rich with multi-layered
+reasoning, highlights the intricacies of Holmes's mind, drawing readers closer to the fascinating
+world of deduction.
+
+
+
+
+                                               2040
+J.3 Complete Verdicts from some LLM Judges
+
+Table 10: GPT-4.1-mini’s verdicts (part 1) of the responses to "Consider the dinner scene in which Holmes details
+his reasoning about the Lauriston Gardens mystery. How does Watson’s narration highlight Holmes’s eagerness to
+explain the logic step by step, and what rhetorical strategies (quoted or paraphrased) does Holmes use to underscore
+each clue’s significance?"
+
+Mode                                 Average Score   Reason
+ 2
+E RAG (comb. extraction)                 7.0000      Very thorough and accurate, captures Watson’s narration of Holmes’s
+                                                     eagerness and detailed rhetorical strategies with direct quotes and
+                                                     logical progression, closely matching the ground truth.
+E2 RAG (comb. embedding)                 7.0000      Comprehensive and well-aligned with the ground truth, includes
+                                                     detailed analysis of Watson’s narration, Holmes’s eagerness, and
+                                                     rhetorical strategies with direct quotes.
+E2 RAG (hyp. embedding)                  7.0000      Detailed and faithful, includes Holmes’s eagerness, rhetorical strate-
+                                                     gies, direct quotes, and Watson’s narration, effectively capturing the
+                                                     essence of the ground truth.
+LightRAG hybrid (hyp. extraction)        6.6667      Highly detailed and faithful to the ground truth, includes Holmes’s
+                                                     systematic reasoning, direct quotes, rhetorical questions, and Wat-
+                                                     son’s narration highlighting Holmes’s eagerness.
+LightRAG hybrid (comb. extraction)       6.3333      Captures Holmes’s eagerness and rhetorical strategies well, including
+                                                     analogies, contrasts, and causal reasoning, with some direct quotes.
+                                                     However, it misses some of the specific step-by-step pacing and
+                                                     the theatrical, emphatic phrasing that the ground truth emphasizes,
+                                                     resulting in a somewhat less vivid depiction.
+E2 RAG (hyp. extraction)                 6.3333      Provides a detailed and faithful account of Watson’s narration and
+                                                     Holmes’s eagerness, including direct quotes and rhetorical strategies
+                                                     such as deductive reasoning, metaphor, and analogy. However, it
+                                                     lacks some of the exact emphatic openings, instructive questions, and
+                                                     dismissive flourishes explicitly cited in the ground truth, making it
+                                                     slightly less precise.
+LightRAG hybrid (comb. embedding)        6.3333      Providing a solid overview of Holmes’s eagerness and rhetorical
+                                                     strategies with direct quotes and logical reasoning. However, it
+                                                     does not fully capture the breathless pacing and specific emphatic or
+                                                     dismissive phrases that characterize the ground truth.
+LightRAG hybrid (hyp. embedding)         6.3333      Nearly identical to hybrid_combined_extraction in content and style,
+                                                     with good coverage of Watson’s narration and Holmes’s rhetorical
+                                                     strategies but lacking the full range of direct quotes and the theatrical
+                                                     emphasis present in the ground truth.
+E2 RAG (vanilla)                         6.0000      Detailed and faithful to the ground truth, includes Holmes’s system-
+                                                     atic approach, direct quotes, and rhetorical strategies, capturing both
+                                                     Watson’s narration and Holmes’s methodical explanation.
+GraphRAG global                          6.0000      Addresses Strong answer highlighting Holmes’s eagerness and rhetor-
+                                                     ical strategies like analogies and emphatic language, with direct
+                                                     quotes and good alignment to the ground truth.
+LightRAG hybrid                          6.0000      Provides a thorough analysis of Watson’s narration and Holmes’s
+                                                     rhetorical strategies with examples and direct quotes, closely aligning
+                                                     with the ground truth’s emphasis on step-by-step logic and Holmes’s
+                                                     delight in explaining.
+GraphRAG drift                           6.0000      Mentions Comprehensive and detailed, covers Watson’s narration
+                                                     and Holmes’s rhetorical strategies including analogies, rhetorical
+                                                     questions, and historical context, closely matching the ground truth.
+GraphRAG local                           5.6667      Good summary of Watson’s narration and Holmes’s rhetorical strate-
+                                                     gies including logical reasoning and analogies, with some direct
+                                                     quotes, but less detailed than the ground truth.
+LightRAG global                          5.6667      Effectively highlights Holmes’s eagerness and rhetorical strategies
+                                                     such as analogies and rhetorical questions with some direct quotes,
+                                                     closely matching the ground truth’s focus on Holmes’s methodical
+                                                     explanation.
+
+
+
+
+                                                       2041
+                                     Table 10: GPT-4.1-mini’s verdicts (continued)
+
+Mode               Average Score    Reason
+LightRAG local         5.3333       Describes Watson’s narration and Holmes’s rhetorical strategies like analogies and high-
+                                    lighting contradictions, but lacks specific direct quotes and detailed step-by-step logic as in
+                                    the ground truth.
+vanilla RAG            4.3333       Captures Holmes’s eagerness and details several rhetorical strategies with some direct
+                                    quotes and examples, but includes some inaccuracies and extraneous content not directly
+                                    related to the Lauriston Gardens dinner scene.
+vanilla HyDE           3.6667       Captures Holmes’s eagerness and rhetorical strategies with some direct quotes and analogies,
+                                    but less focused on the step-by-step logic and specific clues as in the ground truth.
+RQ-RAG                 3.0000       Very brief and vague; mentions Holmes’s eagerness and rhetorical questions but lacks detail,
+                                    examples, or direct quotes to support the answer.
+
+Table 11: Claude-3.7-Sonnet’s verdicts (part 1) of the responses to "Consider the dinner scene in which Holmes
+details his reasoning about the Lauriston Gardens mystery. How does Watson’s narration highlight Holmes’s
+eagerness to explain the logic step by step, and what rhetorical strategies (quoted or paraphrased) does Holmes use
+to underscore each clue’s significance?"
+
+Mode                                    Average Score      Reason
+ 2
+E RAG (comb. extraction)                     7.0000       Mentions footprints and cab marks, and discusses Holmes’s eagerness
+                                                          to explain his reasoning. However, it doesn’t capture the specific
+                                                          rhetorical pattern of short declarations followed by challenges to
+                                                          Watson.
+E2 RAG (comb. embedding)                     7.0000       Discusses Holmes’s eagerness and mentions footprints and stride
+                                                          length, but doesn’t fully capture the rhetorical pattern of short dec-
+                                                          larations followed by challenges to Watson described in the ground
+                                                          truth.
+E2 RAG (hyp. embedding)                      7.0000       Mentions cab marks and footprints, and discusses Holmes’s eagerness
+                                                          to explain his reasoning. However, it doesn’t capture the specific
+                                                          rhetorical pattern of short declarations followed by challenges to
+                                                          Watson.
+LightRAG hybrid (hyp. extraction)            6.6667       Mentions key elements like cab wheel ruts and stride length, and
+                                                          discusses Holmes’s eagerness to explain his reasoning. Includes
+                                                          some specific rhetorical strategies but doesn’t fully capture the rapid,
+                                                          orderly exposition and the pattern of declarations followed by chal-
+                                                          lenges to Watson described in the ground truth.
+LightRAG hybrid (comb. extraction)           6.3333       Accurately mentions cab tracks and Holmes’s eagerness to explain
+                                                          his reasoning step by step. References some rhetorical strategies like
+                                                          analogies and contrasts, but doesn’t fully capture all the specific ele-
+                                                          ments (fingernails, puddle width) or the rhetorical pattern of emphatic
+                                                          openings and dismissive flourishes in the ground truth.
+E2 RAG (hyp. extraction)                     6.3333       Mentions cab marks and footprints but doesn’t specifically address
+                                                          Holmes’s eagerness to explain step by step or his rhetorical pattern
+                                                          of making declarations followed by challenging Watson.
+LightRAG hybrid (comb. embedding)            6.3333       Mentions cab tracks and Holmes’s eagerness to explain his reasoning.
+                                                          Includes some rhetorical strategies but doesn’t fully capture all the
+                                                          specific elements or the rhetorical pattern described in the ground
+                                                          truth.
+LightRAG hybrid (hyp. embedding)             6.3333       Mentions cab tracks and Holmes’s eagerness to explain his reasoning.
+                                                          Includes some rhetorical strategies but doesn’t fully capture all the
+                                                          specific elements or the rhetorical pattern described in the ground
+                                                          truth.
+E2 RAG (vanilla)                             6.0000       Mentions some key elements like footprints and cab marks but doesn’t
+                                                          specifically address Holmes’s eagerness to explain step by step or
+                                                          his rhetorical pattern of making declarations followed by challenging
+                                                          Watson.
+GraphRAG global                              6.0000       Addresses Holmes’s eagerness to explain his reasoning but lacks
+                                                          specific references to footprints, stride lengths, and cab marks. The
+                                                          rhetorical strategies mentioned are not specific to the text.
+LightRAG hybrid                              6.0000       Provides a detailed analysis of Holmes’s eagerness and rhetori-
+                                                          cal strategies but doesn’t specifically mention the footprints, stride
+                                                          lengths, and cab marks that are central to the ground truth. The
+                                                          rhetorical strategies are more generalized than specific.
+GraphRAG drift                               6.0000       Mentions Holmes’s eagerness and some rhetorical strategies but lacks
+                                                          specific references to footprints, stride lengths, and cab marks. The
+                                                          analysis is somewhat generic rather than text-specific.
+
+                                                             2042
+                                    Table 11: Claude-3.7-Sonnet’s verdicts (continued)
+
+Mode                Average Score      Reason
+GraphRAG local             5.6667     Discusses Holmes’s eagerness and some rhetorical strategies but lacks specific references
+                                      to the footprints, stride lengths, and cab marks mentioned in the ground truth. The analysis
+                                      is somewhat generic.
+LightRAG local             5.3333     Discusses Holmes’s eagerness and methodical reasoning but lacks specific references to
+                                      footprints, stride lengths, and cab marks mentioned in the ground truth. The rhetorical
+                                      strategies are generalized rather than specific to the text.
+LightRAG global            5.6667     Addresses Holmes’s eagerness to explain his logic but lacks specific references to the
+                                      footprints, stride lengths, and cab marks. Mentions rhetorical questions but doesn’t capture
+                                      Holmes’s pattern of short declarations followed by challenges to Watson.
+vanilla RAG                4.3333     Contains some relevant elements about Holmes’s analytical reasoning but misquotes
+                                      Holmes and includes fabricated dialogue. The analysis lacks specific references to
+                                      Watson’s narration of Holmes’s eagerness and the step-by-step logic mentioned in the
+                                      ground truth.
+vanilla HyDE               3.6667     Discusses a different story (’The Hound of the Baskervilles’) and doesn’t mention the
+                                      specific elements from the ground truth like footprints, stride lengths, and cab marks.
+RQ-RAG                     3.0000     Very brief and generic. While it mentions Holmes’s eagerness and rhetorical strategies, it
+                                      lacks specific details about footprints, stride lengths, and cab marks. The answer is too
+                                      vague and underdeveloped.
+
+
+
+Table 12: GPT-4o’s verdicts (part 1) of the responses to "Consider the dinner scene in which Holmes details his
+reasoning about the Lauriston Gardens mystery. How does Watson’s narration highlight Holmes’s eagerness to
+explain the logic step by step, and what rhetorical strategies (quoted or paraphrased) does Holmes use to underscore
+each clue’s significance?"
+
+Mode                                     Average Score     Reason
+ 2
+E RAG (comb. extraction)                     7.0000        Partially correct; discusses Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+E2 RAG (comb. embedding)                     7.0000        Partially correct; discusses Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+E2 RAG (hyp. embedding)                      7.0000        Partially correct; discusses Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+LightRAG hybrid (hyp. extraction)            6.6667        Partially correct; discusses Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+LightRAG hybrid (comb. extraction)           6.3333        Partially correct; discusses Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+E2 RAG (hyp. extraction)                     6.3333        Partially correct; discusses Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+LightRAG hybrid (comb. embedding)            6.3333        Partially correct; discusses Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+LightRAG hybrid (hyp. embedding)             6.3333        Partially correct; discusses Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+E2 RAG (vanilla)                             6.0000        Partially correct; discusses Holmes’s enthusiasm and some rhetorical
+                                                           strategies but lacks specific examples.
+GraphRAG global                              6.0000        Addresses Partially correct; discusses Holmes’s eagerness and some
+                                                           rhetorical strategies but lacks specific examples.
+LightRAG hybrid                              6.0000        Partially correct; mentions Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+GraphRAG drift                               6.0000        Mentions Partially correct; discusses Holmes’s eagerness and some
+                                                           rhetorical strategies but lacks specific examples.
+GraphRAG local                               5.6667        Partially correct; discusses Holmes’s eagerness and some rhetorical
+                                                           strategies but lacks specific examples.
+LightRAG local                               5.3333        Partially correct; mentions Holmes’s enthusiasm and some rhetorical
+                                                           strategies but lacks specific examples.
+LightRAG global                              5.6667        Partially correct; discusses Holmes’s eagerness and rhetorical strate-
+                                                           gies but lacks specific examples from the scene.
+vanilla RAG                                  4.3333        Mostly incorrect; lacks specific details about Holmes’s rhetorical
+                                                           strategies and Watson’s narration.
+vanilla HyDE                                 3.6667        Off-topic; discusses ’The Hound of the Baskervilles’ instead of Lau-
+                                                           riston Gardens.
+RQ-RAG                                       3.0000        Very Mostly incorrect; brief mention of rhetorical strategies without
+                                                           specific examples or context.
+
+
+                                                             2043
+K   Additional Results
+Table 13 to Table 18 show the ranking results of each individual LLM judge. It can be observed that
+each mode’s ranking remains relatively stable. On the other hand, different LLM judges have different
+standards, as the scores given by Claude-3-7-sonnet are generally low while the scores given by GPT-4.1-
+mini are generally high across the board. Table 19 to Table 26 show the ranking results for the questions
+based on category, averaged across all six LLM judges.
+
+                              Table 13: Average scores for Claude-3-7-sonnet
+
+                      Rank     Mode                                 Avg Score   Total
+                                2
+                          1    E RAG (comb. extraction)              4.690 0    4 790
+                          2    E2 RAG (hyp. embedding)               4.660 0    4 675
+                          3    GraphRAG local                        4.630 0    4 736
+                          4    E2 RAG (vanilla)                      4.620 0    4 718
+                          5    LightRAG hybrid                       4.600 0    4 626
+                          6    E2 RAG (hyp. extraction)              4.590 0    4 701
+                          7    E2 RAG (comb. embedding)              4.450 0    4 455
+                          8    GraphRAG drift                        4.410 0    4 511
+                          9    LightRAG local                        4.380 0    4 492
+                         10    LightRAG global                       4.270 0    4 361
+                         11    GraphRAG global                       4.060 0    4 139
+                         12    vanilla RAG                           3.970 0    4 067
+                         13    vanilla HyDE                          3.810 0    3 902
+                         14    LightRAG hybrid (hyp. embedding)      3.760 0    3 843
+                         15    LightRAG hybrid (comb. extraction)    3.760 0    3 836
+                         16    LightRAG hybrid (comb. embedding)     3.750 0    3 834
+                         17    LightRAG hybrid (hyp. extraction)     3.720 0    3 791
+                         18    RQ-RAG                                2.650 0    2 604
+
+
+
+                                    Table 14: Average scores for GPT-4o
+
+                      Rank     Mode                                 Avg Score   Total
+                          1    GraphRAG local                        6.670 0    6 846
+                          2    E2 RAG (comb. extraction)             6.650 0    6 829
+                          3    GraphRAG drift                        6.640 0    6 811
+                          4    LightRAG hybrid                       6.620 0    6 795
+                          5    E2 RAG (comb. embedding)              6.600 0    6 731
+                          6    E2 RAG (hyp. extraction)              6.570 0    6 752
+                          7    E2 RAG (hyp. embedding)               6.530 0    6 710
+                          8    E2 RAG (vanilla)                      6.520 0    6 700
+                          9    LightRAG local                        6.440 0    6 623
+                         10    GraphRAG global                       6.360 0    6 525
+                         11    LightRAG global                       6.330 0    6 509
+                         12    LightRAG hybrid (comb. embedding)     6.200 0    6 297
+                         13    LightRAG hybrid (comb. extraction)    6.190 0    6 349
+                         14    LightRAG hybrid (hyp. extraction)     6.190 0    6 343
+                         15    LightRAG hybrid (hyp. embedding)      6.170 0    6 264
+                         16    vanilla HyDE                          6.080 0    6 243
+                         17    vanilla RAG                           5.920 0    6 083
+                         18    RQ-RAG                                3.980 0    3 961
+
+
+
+
+                                                    2044
+        Table 15: Average scores for GPT-4.1-mini
+
+Rank   Mode                                 Avg Score   Total
+        2
+   1   E RAG (comb. extraction)              8.870 0    9 102
+   2   E2 RAG (comb. embedding)              8.800 0    9 028
+   3   E2 RAG (hyp. extraction)              8.640 0    8 877
+   4   E2 RAG (hyp. embedding)               8.640 0    8 856
+   5   GraphRAG drift                        8.430 0    8 653
+   6   GraphRAG local                        8.420 0    8 649
+   7   E2 RAG (vanilla)                      8.360 0    8 586
+   8   LightRAG hybrid                       8.260 0    8 479
+   9   vanilla HyDE                          8.020 0    8 221
+  10   GraphRAG global                       7.950 0    8 161
+  11   LightRAG local                        7.690 0    7 897
+  12   LightRAG global                       7.590 0    7 800
+  13   LightRAG hybrid (comb. embedding)     7.100 0    7 126
+  14   LightRAG hybrid (comb. extraction)    7.090 0    7 241
+  15   LightRAG hybrid (hyp. embedding)      7.010 0    7 054
+  16   LightRAG hybrid (hyp. extraction)     6.990 0    7 157
+  17   vanilla RAG                           6.230 0    6 399
+  18   RQ-RAG                                3.910 0    3 871
+
+ Table 16: Average scores for claude-opus-4-1-20250805
+
+Rank   Mode                                 Avg Score   Total
+        2
+   1   E RAG (comb. extraction)              5.960 0    5 397
+   2   E2 RAG (hyp. embedding)               5.940 0    5 354
+   3   E2 RAG (hyp. extraction)              5.850 0    5 297
+   4   E2 RAG (comb. embedding)              5.850 0    5 255
+   5   vanilla RAG                           5.650 0    4 918
+   6   E2 RAG (vanilla)                      5.650 0    4 913
+   7   GraphRAG local                        5.590 0    5 063
+   8   GraphRAG drift                        5.520 0    5 003
+   9   LightRAG hybrid                       5.510 0    4 781
+  10   LightRAG local                        5.340 0    4 642
+  11   LightRAG global                       5.020 0    4 367
+  12   GraphRAG global                       4.840 0    4 381
+  13   vanilla HyDE                          4.630 0    4 194
+  14   LightRAG hybrid (comb. embedding)     4.450 0    4 030
+  15   LightRAG hybrid (comb. extraction)    4.430 0    4 015
+  16   LightRAG hybrid (hyp. embedding)      4.430 0    4 009
+  17   LightRAG hybrid (hyp. extraction)     4.410 0    3 998
+  18   RQ-RAG                                3.710 0    2 131
+
+       Table 17: Average scores for gemini-2.5-pro
+
+Rank   Mode                                 Avg Score   Total
+        2
+   1   E RAG (hyp. embedding)                5.600 0    5 703
+   2   E2 RAG (hyp. extraction)              5.590 0    5 720
+   3   E2 RAG (comb. extraction)             5.520 0    5 651
+   4   E2 RAG (comb. embedding)              5.460 0    5 461
+   5   LightRAG local                        5.450 0    5 381
+   6   GraphRAG local                        5.440 0    5 570
+   7   LightRAG hybrid                       5.380 0    5 201
+   8   E2 RAG (vanilla)                      5.370 0    5 290
+   9   LightRAG global                       5.200 0    5 136
+  10   GraphRAG drift                        4.970 0    5 090
+  11   GraphRAG global                       4.810 0    4 920
+  12   vanilla RAG                           4.720 0    4 657
+  13   vanilla HyDE                          4.360 0    4 397
+  14   LightRAG hybrid (hyp. extraction)     4.230 0    4 286
+  15   LightRAG hybrid (hyp. embedding)      4.230 0    4 228
+  16   LightRAG hybrid (comb. extraction)    4.220 0    4 284
+  17   LightRAG hybrid (comb. embedding)     4.220 0    4 054
+  18   RQ-RAG                                2.120 0    1 942
+
+                            2045
+            Table 18: Average scores for qwen-max-2025-01-25
+
+    Rank      Mode                                 Avg Score   Total
+        1     LightRAG hybrid                       6.930 0     6 858
+        2     E2 RAG (comb. embedding)              6.680 0     6 111
+        3     E2 RAG (hyp. embedding)               6.670 0     6 127
+        4     E2 RAG (comb. extraction)             6.650 0     6 812
+        5     GraphRAG drift                        6.580 0     6 729
+        6     E2 RAG (hyp. extraction)              6.580 0     6 729
+        7     GraphRAG local                        6.550 0     6 695
+        8     LightRAG local                        6.450 0     6 380
+        9     LightRAG hybrid (comb. embedding)     6.400 0     6 342
+       10     LightRAG hybrid (comb. extraction)    6.380 0     6 510
+       11     LightRAG hybrid (hyp. embedding)      6.360 0     6 301
+       12     GraphRAG global                       6.350 0     6 493
+       13     LightRAG hybrid (hyp. extraction)     6.340 0     6 468
+       14     LightRAG global                       6.340 0     6 274
+       15     vanilla HyDE                          6.260 0     6 419
+       16     E2 RAG (vanilla)                      6.170 0     6 032
+       17     vanilla RAG                           5.860 0     5 795
+       18     RQ-RAG                                3.720 0     3 061
+
+         Table 19: Causal Consistency category: average scores
+
+    Rank      Mode                                 Avg Score   Total
+               2
+        1     E RAG (comb. extraction)              6.160 0    10 020
+        2     E2 RAG (hyp. embedding)               6.120 0     9 665
+        3     E2 RAG (comb. embedding)              6.070 0     9 488
+        4     E2 RAG (hyp. extraction)              6.050 0     9 855
+        5     E2 RAG (vanilla)                      6.010 0     9 705
+        6     GraphRAG local                        5.980 0     9 710
+        7     LightRAG hybrid                       5.870 0     9 405
+        8     GraphRAG drift                        5.830 0     9 497
+        9     LightRAG local                        5.650 0     9 144
+       10     GraphRAG global                       5.520 0     8 973
+       11     LightRAG global                       5.490 0     8 877
+       12     vanilla RAG                           5.190 0     8 399
+       13     vanilla HyDE                          5.110 0     8 290
+       14     LightRAG hybrid (comb. extraction)    4.890 0     7 912
+       15     LightRAG hybrid (comb. embedding)     4.860 0     7 685
+       16     LightRAG hybrid (hyp. extraction)     4.850 0     7 857
+       17     LightRAG hybrid (hyp. embedding)      4.830 0     7 707
+       18     RQ-RAG                                2.950 0     3 387
+
+Table 20: Character and Behavioral Consistency category: average scores
+
+    Rank      Mode                                 Avg Score   Total
+               2
+        1     E RAG (comb. extraction)              6.570 0    15 193
+        2     E2 RAG (hyp. embedding)               6.550 0    14 894
+        3     E2 RAG (hyp. extraction)              6.510 0    15 068
+        4     E2 RAG (comb. embedding)              6.510 0    14 730
+        5     LightRAG hybrid                       6.480 0    14 851
+        6     GraphRAG local                        6.370 0    14 747
+        7     E2 RAG (vanilla)                      6.310 0    14 446
+        8     GraphRAG drift                        6.290 0    14 539
+        9     LightRAG local                        6.210 0    14 281
+       10     LightRAG global                       6.060 0    13 921
+       11     GraphRAG global                       5.910 0    13 679
+       12     vanilla HyDE                          5.850 0    13 513
+       13     LightRAG hybrid (comb. embedding)     5.720 0    13 029
+       14     LightRAG hybrid (comb. extraction)    5.710 0    13 170
+       15     LightRAG hybrid (hyp. embedding)      5.690 0    13 017
+       16     LightRAG hybrid (hyp. extraction)     5.670 0    13 101
+       17     vanilla RAG                           5.510 0    12 653
+       18     RQ-RAG                                3.530 0     9 321
+
+                                   2046
+    Table 21: Emotional and Psychological category: average scores
+
+     Rank    Mode                                 Avg Score   Total
+         1   GraphRAG local                        6.460 0    1 576
+         2   LightRAG hybrid                       6.340 0    1 515
+         3   E2 RAG (hyp. extraction)              6.300 0    1 536
+         4   E2 RAG (comb. extraction)             6.240 0    1 522
+         5   GraphRAG drift                        6.230 0    1 521
+         6   E2 RAG (hyp. embedding)               6.230 0    1 495
+         7   E2 RAG (vanilla)                      6.140 0    1 498
+         8   LightRAG local                        6.110 0    1 496
+         9   E2 RAG (comb. embedding)              6.080 0    1 454
+        10   RQ-RAG                                5.920 0    1 383
+        11   LightRAG global                       5.620 0    1 372
+        12   vanilla HyDE                          5.580 0    1 362
+        13   GraphRAG global                       5.450 0    1 324
+        14   LightRAG hybrid (comb. embedding)     5.450 0    1 307
+        15   LightRAG hybrid (comb. extraction)    5.430 0    1 325
+        16   LightRAG hybrid (hyp. extraction)     5.420 0    1 316
+        17   LightRAG hybrid (hyp. embedding)      5.420 0    1 311
+        18   vanilla RAG                           5.290 0    1 291
+
+    Table 22: Narrative and Plot Structure category: average scores
+
+     Rank    Mode                                 Avg Score   Total
+              2
+         1   E RAG (comb. extraction)              6.380 0    1 664
+         2   E2 RAG (comb. embedding)              6.330 0    1 602
+         3   E2 RAG (hyp. embedding)               6.250 0    1 595
+         4   E2 RAG (hyp. extraction)              6.230 0    1 625
+         5   GraphRAG local                        6.210 0    1 622
+         6   GraphRAG drift                        6.170 0    1 611
+         7   E2 RAG (vanilla)                      6.000 0    1 525
+         8   LightRAG global                       5.960 0    1 521
+         9   LightRAG hybrid                       5.880 0    1 499
+        10   LightRAG local                        5.840 0    1 490
+        11   GraphRAG global                       5.680 0    1 483
+        12   vanilla RAG                           5.310 0    1 355
+        13   vanilla HyDE                          5.300 0    1 377
+        14   LightRAG hybrid (hyp. embedding)      5.150 0    1 308
+        15   LightRAG hybrid (comb. extraction)    5.130 0    1 335
+        16   LightRAG hybrid (comb. embedding)     5.130 0    1 304
+        17   LightRAG hybrid (hyp. extraction)     5.120 0    1 332
+        18   RQ-RAG                                3.470 0    1 249
+
+Table 23: Setting, Environment and Atmosphere category: average scores
+
+     Rank    Mode                                 Avg Score   Total
+              2
+         1   E RAG (comb. extraction)              5.960 0    1 956
+         2   E2 RAG (hyp. extraction)              5.770 0    1 897
+         3   LightRAG hybrid                       5.770 0    1 882
+         4   E2 RAG (comb. embedding)              5.770 0    1 874
+         5   E2 RAG (hyp. embedding)               5.750 0    1 863
+         6   E2 RAG (vanilla)                      5.620 0    1 827
+         7   GraphRAG drift                        5.480 0    1 802
+         8   LightRAG local                        5.460 0    1 781
+         9   GraphRAG local                        5.370 0    1 767
+        10   vanilla RAG                           5.330 0    1 738
+        11   LightRAG global                       5.230 0    1 705
+        12   vanilla HyDE                          5.210 0    1 713
+        13   GraphRAG global                       5.170 0    1 697
+        14   LightRAG hybrid (comb. extraction)    4.940 0    1 614
+        15   LightRAG hybrid (comb. embedding)     4.940 0    1 595
+        16   LightRAG hybrid (hyp. extraction)     4.910 0    1 605
+        17   LightRAG hybrid (hyp. embedding)      4.900 0    1 587
+        18   RQ-RAG                                2.900 0      909
+
+                                 2047
+   Table 24: Social, Cultural and Political category: average scores
+
+   Rank     Mode                                 Avg Score    Total
+             2
+       1    E RAG (comb. extraction)               6.370 0    2 750
+       2    GraphRAG local                         6.360 0    2 741
+       3    E2 RAG (hyp. extraction)               6.340 0    2 727
+       4    LightRAG hybrid                        6.340 0    2 529
+       5    E2 RAG (hyp. embedding)                6.270 0    2 629
+       6    E2 RAG (comb. embedding)               6.250 0    2 594
+       7    GraphRAG drift                         6.080 0    2 620
+       8    E2 RAG (vanilla)                       6.060 0    2 448
+       9    LightRAG local                         6.040 0    2 442
+      10    GraphRAG global                        5.690 0    2 451
+      11    LightRAG global                        5.680 0    2 293
+      12    vanilla RAG                            5.390 0    2 177
+      13    vanilla HyDE                           5.380 0    2 302
+      14    LightRAG hybrid (comb. extraction)     5.350 0    2 289
+      15    LightRAG hybrid (comb. embedding)      5.330 0    2 224
+      16    LightRAG hybrid (hyp. extraction)      5.310 0    2 274
+      17    LightRAG hybrid (hyp. embedding)       5.290 0    2 234
+      18    RQ-RAG                                 3.060 0    1 398
+
+ Table 25: Symbolism, Imagery and Motifs category: average scores
+
+   Rank    Mode                                  Avg Score    Total
+            2
+       1   E RAG (comb. embedding)                6.560 0     2 590
+       2   LightRAG hybrid                        6.540 0     2 446
+       3   E2 RAG (comb. extraction)              6.510 0     2 610
+       4   E2 RAG (hyp. extraction)               6.480 0     2 599
+       5   E2 RAG (hyp. embedding)                6.480 0     2 552
+       6   GraphRAG local                         6.370 0     2 548
+       7   GraphRAG drift                         6.270 0     2 508
+       8   E2 RAG (vanilla)                       6.060 0     2 278
+       9   LightRAG global                        6.040 0     2 278
+      10   LightRAG local                         6.020 0     2 270
+      11   GraphRAG global                        5.990 0     2 394
+      12   vanilla HyDE                           5.770 0     2 312
+      13   LightRAG hybrid (comb. embedding)      5.460 0     2 164
+      14   vanilla RAG                            5.460 0     2 057
+      15   LightRAG hybrid (hyp. embedding)       5.430 0     2 163
+      16   LightRAG hybrid (comb. extraction)     5.420 0     2 172
+      17   LightRAG hybrid (hyp. extraction)      5.410 0     2 170
+      18   RQ-RAG                                 3.170 0     1 346
+
+Table 26: Thematic, Philosophical and Moral category: average scores
+
+   Rank     Mode                                 Avg Score    Total
+             2
+       1    E RAG (comb. extraction)               6.760 0    2 866
+       2    GraphRAG local                         6.730 0    2 848
+       3    E2 RAG (hyp. embedding)                6.650 0    2 732
+       4    E2 RAG (comb. embedding)               6.640 0    2 709
+       5    LightRAG hybrid                        6.580 0    2 613
+       6    E2 RAG (hyp. extraction)               6.530 0    2 769
+       7    GraphRAG drift                         6.400 0    2 699
+       8    E2 RAG (vanilla)                       6.250 0    2 512
+       9    LightRAG local                         6.230 0    2 511
+      10    GraphRAG global                        6.200 0    2 618
+      11    LightRAG global                        6.170 0    2 480
+      12    vanilla HyDE                           5.950 0    2 507
+      13    LightRAG hybrid (comb. embedding)      5.750 0    2 375
+      14    LightRAG hybrid (comb. extraction)     5.740 0    2 418
+      15    LightRAG hybrid (hyp. embedding)       5.700 0    2 372
+      16    LightRAG hybrid (hyp. extraction)      5.690 0    2 388
+      17    vanilla RAG                            5.580 0    2 249
+      18    RQ-RAG                                 3.430 0    1 528
+
+                                 2048
+L     Pseudocode
+
+Algorithm 1 Entity-Event KG Insertion (Preprocessing)
+Require: document D; entity extractor gent (·); event extractor gevt (·);
+        text encoder f (·); top-L chunk of size m
+Ensure: graphs Gent , Gevt ; bipartite edge set B; vector stores Ient , Ievt
+ 1: procedure I NSERT D OCUMENT(D)
+ 2:    Step 1: chunking
+ 3:         ℓ=1 ← C HUNK (D, m)
+       {cℓ }L
+ 4:    Step 2: entity and event extraction
+ 5:    for ℓ ← 1 to L do
+              (ℓ)
+ 6:        Vent ← gent (cℓ )                                                   ▷ entity extraction pass
+              (ℓ)
+ 7:        Vevt ← gevt (cℓ )                                                   ▷ event extraction pass
+                  S (ℓ)              S (ℓ)
+ 8:    Vent ← ℓ Vent ; Vevt ← ℓ Vevt
+ 9:    Step 3: build edge sets
+10:    Eent , Eevt ← I NTRAC HUNK E DGES({cℓ }, Vent , Vevt )
+11:    B ← B UILD B IPARTITE(Vent , Vevt )
+12:    Step 4: embed and index
+13:    for all v ∈ Vent do                                                                  ▷ entities
+14:        Ient .A DD v, f (C ANON(v))
+15:     for all e ∈ Vevt do                                                                  ▷ events
+16:         Ievt .A DD e, f (C ANON(e))
+17:     return Gent = (Vent , Eent ), Gevt = (Vevt , Eevt ), B
+
+
+Algorithm 2 B UILD B IPARTITE: connect entity mentions to events
+Require: entity nodes Vent , event nodes Vevt
+Ensure: bipartite edge set B
+ 1: function B UILD B IPARTITE(Vent , Vevt )
+ 2:    B←∅
+ 3:    /* surface-form string match inside the same chunk */
+ 4:    for all v ∈ Vent do
+ 5:        c ← C HUNK ID(v); S ← NAME(v)
+ 6:        for all e ∈ Vevt with C HUNK ID(e) = c do
+ 7:            if Contains(N orm(Desc(e)), N orm(S)) then
+ 8:                B ← B ∪ {(v, e)}
+ 9:    return B
+
+
+
+
+                                                     2049
+Algorithm 3 Entity-Event KG R ETRIEVE (Inference-time)
+Require: query q, entity store Ient , event store Ievt ,
+ 1: knowledge graph G = (V, E) with edge attributes,
+ 2: node types τ : V → {entity, event},
+ 3: chunk mapping C HUNKS : V → 2P ,
+ 4: encoder f , extractor g, top-k parameter k, decay γ
+Ensure: ranked context bundle C
+ 5: procedure R ETRIEVE(q)
+ 6:    Cue extraction and seeding
+ 7:    Sent , Sevt ← g(q)
+ 8:    (Vqent , sent ) ← V ECTOR L OOKUP(Sent , Ient , f, k)
+ 9:    (Vqevt , sevt ) ← V ECTOR L OOKUP(Sevt , Ievt , f, k)
+10:    Vq ← Vqent ∪ Vqevt
+                 (
+                   sent [v] v ∈ Vqent
+11:    s[v] ←                         ; s[u] ← 0 otherwise
+                   sevt [v] v ∈ Vqevt
+12:    One-hop expansion from event seeds6
+13:    Vq+ ← Vq
+14:    for all e ∈ Vqevt , u ∈ N EIGHBORS(e) where τ (u) ∈ {entity, event} do
+15:        Vq+ ← Vq+ ∪ {u}
+16:        s[u] ← max(s[u], γ · s[e])
+17:    PassageS ranking
+18:    P ← x∈Vq+ C HUNKS(x)
+19:    scores[p] ← maxx:p∈C HUNKS(x) s[x] for each p ∈ P
+20:    Pk ← T OP K(P, scores, k)
+21:    Context assembly
+22:    Gsub ← (Vq+ , {(u, v, attr) ∈ E | u, v ∈ Vq+ })                      ▷ preserves edge attributes
+23:    C ← F ORMAT C ONTEXT(Pk , Gsub )
+24:    return C
+
+
+M     Evaluation Prompts and Settings
+Verifier prompt (used for passage-grounded answer checking).
+You are an expert fact-checker. Your task is to evaluate if a given answer is
+fully supported by the provided context passage.
+
+Context Passage:
+{passage}
+
+Question:
+{question}
+
+Answer to Verify:
+{answer}
+
+Instructions:
+Read the passage, question, and answer carefully. Determine if every single
+claim in the "Answer to Verify" is factually supported by the "Context Passage".
+   6
+     We treat events as the expansion frontier: we initialize Vq with both entity and event seeds, but the one-hop expansion
+and score propagation are performed from event seeds Vqevt . Entity seeds contribute as candidate nodes and passages, and can
+receive propagated scores via bipartite edges.
+
+                                                           2050
+The answer must be 100% accurate based only on the provided text. Any
+information, even if plausible, that is not in the passage makes the answer
+incorrect.
+
+Respond with a single JSON object containing two keys: "verdict" (either
+"Correct" or "Incorrect") and "reason" (a brief explanation for your verdict).
+
+Example:
+{
+  "verdict": "Incorrect",
+  "reason": "The passage states the axe was made of tin, but the answer claims
+             it was steel."
+}
+
+Corruptor prompt (for synthetic negative answers in verifier stress tests).
+You are a data corruptor. Your task is to subtly alter a given answer based on
+a specific error type, using only the information in the provided context
+passage. The corrupted answer must be plausible but factually incorrect
+according to the passage.
+
+Context Passage:
+{passage}
+
+Question:
+{question}
+
+Original Correct Answer:
+{answer}
+
+Corruption Task:
+Rewrite the 'Original Correct Answer' to introduce the following error:
+{error_type}.
+
+- Reversing Causality: Swap cause and effect.
+- Fabricating Motivation: Invent a plausible but unsupported reason.
+- Swapping Entities: Swap roles of two characters or objects.
+- Adding Plausible but Incorrect Details: Add a small, believable but unsupported
+  detail.
+
+Do not state that you are corrupting the data. Just provide the new, subtly
+incorrect answer.
+
+Corrupted Answer:
+
+Generation guardrails for the backbone LLM. The response generator is instructed to rely only on
+retrieved passages and to abstain when evidence is missing:
+
+    Generate a response of the target length and format that responds to the user’s question,
+    summarizing information in the input document chunks appropriate for the response length and
+    format, and incorporating any relevant general knowledge. If you do not know the answer, say
+    so. Do not make anything up. Do not include information where the supporting evidence is not
+    provided.
+                                               2051
+N   LLM Versions and Reproducibility
+Backbone model for all compared RAG pipelines. gpt-4o-mini-2024-07-18 (a weaker backbone
+model chosen to test RAG’s capability).
+Embedding model for all compared RAG pipelines. text-embedding-3-small (default choice of
+many baselines).
+LLM judges (six-model jury).                 claude-3-7-sonnet-20250219, gpt-4o-2024-08-06,
+claude-opus-4-1-20250805,          gpt-4.1-mini-2025-04-14,         gemini-2.5-pro         (stable),
+qwen-max-2025-01-25. LLM judges from different model families are selected to prevent model biases.
+Decoding settings for evaluation. Temperature: 0, top-p: 1.0. We average scores across the six judges.
+To mitigate vendor updates, we release raw judge outputs and per-item scores, and we record exact API
+model names and timestamps.
+Deterministic preprocessing and retrieval. All indices are frozen before evaluation. We log random
+seeds for any sampling in chunking or negative sampling.
+
+O    Verifier Robustness: Large-Scale Sanity Check
+We tested the verifier on 100 items: 50 correct answers and 50 corrupted answers created by the corruptor
+prompt in Appendix M. Overall accuracy was 93%. The confusion matrix is below.
+
+                              Table 27: Verifier confusion matrix on 100 items.
+
+                                               Predicted Correct    Predicted Incorrect
+                            Actual Correct            44                     6
+                            Actual Incorrect           1                    49
+
+
+  The verifier detected 49 out of 50 corrupted cases (98%), with six false positives on correct answers.
+This conservative bias is suitable for dataset curation where soundness is preferred over recall.
+
+P   Deterministic Supplementary Metrics
+We computed BLEU, BERTScore (F1), and NLI entailment as supplementary, fully deterministic metrics.
+The rankings diverge from the LLM judges for ChronoQA’s temporally grounded questions.
+
+                       Table 28: Deterministic metrics on ChronoQA. Higher is better.
+
+               Mode                                  BERTScore (F1)       NLI (Entailment)   BLEU
+               RQ-RAG                                      0.5838                0.6440      0.0178
+               vanilla RAG                                 0.5569                0.4606      0.0109
+               E2 RAG (comb. embedding)                    0.5520                0.4914      0.0102
+               E2 RAG (hyp. embedding)                     0.5515                0.5256      0.0104
+               E2 RAG (comb. extraction)                   0.5515                0.4622      0.0104
+               E2 RAG (vanilla)                            0.5504                0.4814      0.0097
+               E2 RAG (hyp. extraction)                    0.5492                0.4604      0.0103
+               LightRAG local                              0.5491                0.4634      0.0094
+               LightRAG global                             0.5489                0.4870      0.0098
+               LightRAG hybrid                             0.5484                0.4821      0.0095
+               vanilla HyDE                                0.5446                0.5311      0.0084
+               GraphRAG global                             0.5399                0.2628      0.0133
+               LightRAG hybrid (hyp. extraction)           0.5311                0.5167      0.0070
+               LightRAG hybrid (hyp. embedding)            0.5311                0.5304      0.0071
+               LightRAG hybrid (comb. extraction)          0.5310                0.5204      0.0070
+               LightRAG hybrid (comb. embedding)           0.5306                0.5246      0.0070
+               GraphRAG local                              0.5147                0.6698      0.0124
+               GraphRAG drift                              0.5080                0.6898      0.0113
+          Model checkpoints (Hugging Face): BERTScore uses microsoft/deberta-xlarge-mnli. NLI uses
+                                    cross-encoder/nli-deberta-v3-large.
+
+
+                                                      2052
+Interpretation. The discrepancy is stark:
+
+    • RQ-RAG, which was ranked last by LLM judges for producing simplistic or incorrect answers, is
+      paradoxically ranked first on both BERTScore and BLEU score.
+
+    • Conversely, our top-performing method, E2 RAG, ranks only modestly or even poorly across all three
+      deterministic metrics.
+
+    • GraphRAG drift is ranked first by NLI but last by BERTScore, which shows that these metrics can
+      reward opposing signals. We should therefore exercise caution when interpreting their numbers. In
+      contrast, the individual rankings from our six LLM judges show strong consistency (Table 4), which
+      makes them more reliable for this task.
+
+   This mismatch shows that metrics focused on lexical overlap or static entailment are poor proxies for
+the temporal and causal reasoning that ChronoQA measures. This analysis strengthens the justification for
+our LLM-based evaluation.
+
+Q    Generalization to an External Temporal Benchmark
+We evaluated on the subset of Complex-TR (Tan et al., 2024) with context length greater than 10,000
+tokens (236 questions). We report average judge scores using the same six LLM judges as in the main
+evaluation in Table 29. As the results show, our methods rank at the top. While GraphRAG drift is
+marginally better than one E2 RAG (hyp. embedding), all other E2 RAG variants outperform it. Notably, the
+strong performance of E2 RAG (vanilla) indicates that our core method can perform well even without the
+hypothetical document generation component on this benchmark.
+
+                    Table 29: Results on long-context subset of Complex-TR (236 items).
+
+                               Mode                                 Avg. Score
+                               E RAG (comb. extraction)
+                                2
+                                                                       6.2048
+                               E2 RAG (vanilla)                        6.1872
+                               E2 RAG (comb. embedding)                6.1412
+                               E2 RAG (hyp. extraction)                6.0904
+                               GraphRAG drift                          6.0692
+                               E2 RAG (hyp. embedding)                 6.0664
+                               LightRAG hybrid                         6.0383
+                               vanilla RAG                             6.0255
+                               vanilla HyDE                            6.0141
+                               GraphRAG local                          5.9901
+                               LightRAG global                         5.9745
+                               LightRAG local                          5.9191
+                               LightRAG hybrid (hyp. extraction)       5.6662
+                               LightRAG hybrid (hyp. embedding)        5.6620
+                               LightRAG hybrid (comb. extraction)      5.6577
+                               LightRAG hybrid (comb. embedding)       5.6549
+                               GraphRAG global                         5.6257
+                               RQ-RAG                                  1.0170
+
+
+
+R    Free-Form vs. Multiple-Choice: A Demonstration
+We convert a ChronoQA item into multiple choice and compare outcomes.
+Question (Les Misérables). When Valjean rescues Marius from the barricade, does it occur before
+Javert’s death, and how does the script clarify the order to avoid mixing future details with the immediate
+rescue?
+Options. A) No, Javert’s death occurs first, ...
+B) Valjean saves Marius first, ... later Javert commits suicide, ...
+C) The events are shown simultaneously, ...
+D) Valjean begins the rescue, ... Javert’s death occurs in the middle, ...
+                                                    2053
+Observations. In free-form, the vanilla RAG baseline received judge scores of 1, 3, and 3. In multiple
+choice, the same system selects the ground truth option (B) easily. This illustrates that MCQ format can
+mask reasoning weaknesses that ChronoQA exposes.
+
+S   Native Long Context vs. RAG Augmentation
+A natural question is whether retrieval augmentation remains useful as LLM context windows grow.
+ChronoQA is built from long narrative documents, but the stories were chosen to be able to fit into
+the long context window so that the oracle LLMs could be provided the entire story during dataset
+construction. This enables a direct “native long-context” QA baseline that does not rely on retrieval. In the
+main experiments, we intentionally standardize the backbone generator and embedding model across all
+compared RAG pipelines (including GraphRAG, LightRAG, vanilla RAG, and HyDE) so that differences
+reflect retrieval architecture rather than model capacity.
+   Table 30 compares native long-context QA using two strong long-context backbones (Claude-3.5-Sonnet
+and Gemini-2.5-Pro) and also evaluates Gemini-2.5-Pro augmented with E2 RAG (combined embedding).
+Even with Gemini-2.5-Pro as the backbone, adding E2 RAG improves the average judge score from 8.53
+to 8.63 (+0.09). This indicates that E2 RAG provides measurable gains even when the backbone LLM is
+substantially stronger than the default generator used in the main experiments and can ingest the full
+narrative context.
+                   Table 30: Native long-context performance and augmentation with E2 RAG.
+
+                     Setting                                                Avg. Score
+                     Claude-3.5-Sonnet (native long context, no RAG)             7.0604
+                     Gemini-2.5-Pro (native long context, no RAG)                8.5323
+                     Gemini-2.5-Pro + E2 RAG (comb. embedding)                   8.6262
+
+   We view this as consistent with long-context analyses showing that effective context utilization can
+fall short of the nominal window size and that models exhibit strong positional bias, often underusing
+evidence that is buried deep inside long prompts (Liu et al., 2023; An et al., 2024; Gao et al., 2024; Li
+et al., 2024; Hong et al., 2025). In narrative QA, the evidence for a question is often sparse and temporally
+localized; presenting the full story can bury the decisive passages or increase the risk of mixing early-story
+and late-story entity states. E2 RAG mitigates this by producing a compact evidence bundle centered on
+temporally grounded entity mentions and their associated events, which can help the backbone focus on
+the most relevant portions of the narrative rather than searching a very long prompt.
+
+
+
+
+                                                    2054
+

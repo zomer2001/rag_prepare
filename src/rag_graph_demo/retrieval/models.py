@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from rag_graph_demo.domain.events import EventQueryResponse
 
-RetrievalChannel = Literal["vector", "graph", "event"]
+RetrievalChannel = Literal["vector", "graph", "event", "tkg"]
 
 
 class QueryPlan(BaseModel):
@@ -15,6 +15,7 @@ class QueryPlan(BaseModel):
 
     low_level_keywords: list[str] = Field(default_factory=list)
     high_level_keywords: list[str] = Field(default_factory=list)
+    relations: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
     event_types: list[str] = Field(default_factory=list)
     start_time: str | None = None
@@ -50,5 +51,6 @@ class UnifiedRetrievalResult:
     bundles: tuple[EvidenceBundle, ...]
     candidates: dict[RetrievalChannel, tuple[EvidenceCandidate, ...]]
     graph_data: dict[str, Any] = field(default_factory=dict)
+    evidence_graph: dict[str, Any] = field(default_factory=dict)
     event_result: EventQueryResponse | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

@@ -12,6 +12,11 @@ from rag_graph_demo.domain.events import EventQueryRequest, EventQueryResponse
 from rag_graph_demo.domain.tkg import TKGQueryRequest
 from rag_graph_demo.lightrag_engine.engine import LightRAGEngine
 from rag_graph_demo.retrieval.event_vector import EventVectorIndex
+from rag_graph_demo.retrieval.evolink import (
+    CoordinationGraphStore,
+    EvoLinkCoordinator,
+    EvoLinkResult,
+)
 from rag_graph_demo.retrieval.fusion import fuse_evidence
 from rag_graph_demo.retrieval.models import (
     EvidenceCandidate,
@@ -49,8 +54,10 @@ class UnifiedRetrievalOrchestrator:
         event_service: EventService | None = None,
         event_vector_index: EventVectorIndex | None = None,
         tkg_registry: TKGRegistry | None = None,
+        coordination_store: CoordinationGraphStore | None = None,
         document_id_resolver: DocumentIdResolver = default_document_id_resolver,
         strict_event_failures: bool = False,
+        strict_coordination_failures: bool = False,
         max_sources_per_event: int = 2,
     ) -> None:
         self._engine = engine
@@ -58,9 +65,17 @@ class UnifiedRetrievalOrchestrator:
         self._event_service = event_service
         self._event_vector_index = event_vector_index
         self._tkg_registry = tkg_registry
+        self._evolink = (
+            EvoLinkCoordinator(coordination_store) if coordination_store else None
+        )
         self._document_id_resolver = document_id_resolver
         self._strict_event_failures = strict_event_failures
+        self._strict_coordination_failures = strict_coordination_failures
         self._max_sources_per_event = max(1, max_sources_per_event)
+
+    def bind_coordination_store(self, store: CoordinationGraphStore) -> None:
+        """Attach the Neo4j coordination graph after an evaluation index is built."""
+        self._evolink = EvoLinkCoordinator(store)
 
     async def retrieve(
         self,
@@ -68,31 +83,48 @@ class UnifiedRetrievalOrchestrator:
         *,
         top_k: int,
         include_events: bool,
+        link_evidence: bool = False,
         candidate_multiplier: int = 3,
+        channels: set[RetrievalChannel] | None = None,
     ) -> UnifiedRetrievalResult:
         started = perf_counter()
         plan = await self._planner.plan(question)
         candidate_limit = max(top_k, top_k * candidate_multiplier)
-        vector_task = self._engine.retrieve_data(
-            question,
-            mode="naive",
-            chunk_top_k=candidate_limit,
-            enable_rerank=False,
-        )
-        graph_task = self._engine.retrieve_data(
-            question,
-            mode="hybrid",
-            top_k=candidate_limit,
-            chunk_top_k=candidate_limit,
-            enable_rerank=False,
-            high_level_keywords=plan.high_level_keywords,
-            low_level_keywords=plan.low_level_keywords,
-        )
-        if include_events:
+        requested_channels = set(channels or {"vector", "graph"})
+        if channels is None and include_events:
+            requested_channels.add("event")
+        unsupported = requested_channels - {"vector", "graph", "event"}
+        if unsupported:
+            raise ValueError(f"Unsupported retrieval channels: {sorted(unsupported)}")
+        if "vector" in requested_channels:
+            vector_task = self._engine.retrieve_data(
+                question,
+                mode="naive",
+                chunk_top_k=candidate_limit,
+                enable_rerank=False,
+            )
+        else:
+            vector_task = asyncio.sleep(0, result={"data": {}})
+        if "graph" in requested_channels:
+            graph_task = self._engine.retrieve_data(
+                question,
+                mode="hybrid",
+                top_k=candidate_limit,
+                chunk_top_k=candidate_limit,
+                enable_rerank=False,
+                high_level_keywords=plan.high_level_keywords,
+                low_level_keywords=plan.low_level_keywords,
+            )
+        else:
+            graph_task = asyncio.sleep(0, result={"data": {}})
+        if "event" in requested_channels:
             event_task = self._retrieve_events_safely(question, plan, candidate_limit)
         else:
             event_task = asyncio.sleep(0, result=([], None, None))
-        tkg_task = self._retrieve_tkg_graph_candidates(plan, candidate_limit)
+        if "graph" in requested_channels:
+            tkg_task = self._retrieve_tkg_graph_candidates(plan, candidate_limit)
+        else:
+            tkg_task = asyncio.sleep(0, result=[])
         vector_raw, graph_raw, event_output, tkg_candidates = await asyncio.gather(
             vector_task,
             graph_task,
@@ -104,11 +136,28 @@ class UnifiedRetrievalOrchestrator:
         graph_candidates = self._merge_graph_candidates(
             self._light_candidates(graph_raw, "graph"), tkg_candidates
         )
-        channel_candidates: dict[str, list[EvidenceCandidate]] = {
-            "vector": vector_candidates,
-            "graph": graph_candidates,
-        }
-        if include_events:
+        evolink_result, evolink_error = await self._coordinate_safely(
+            plan,
+            graph_raw,
+            event_candidates,
+            candidate_limit,
+            enabled=link_evidence,
+        )
+        if link_evidence:
+            graph_candidates = self._merge_channel_candidates(
+                graph_candidates,
+                list(evolink_result.graph_candidates),
+            )
+            event_candidates = self._merge_channel_candidates(
+                event_candidates,
+                list(evolink_result.event_candidates),
+            )
+        channel_candidates: dict[str, list[EvidenceCandidate]] = {}
+        if "vector" in requested_channels:
+            channel_candidates["vector"] = vector_candidates
+        if "graph" in requested_channels or evolink_result.graph_candidates:
+            channel_candidates["graph"] = graph_candidates
+        if "event" in requested_channels or evolink_result.event_candidates:
             channel_candidates["event"] = event_candidates
         bundles = fuse_evidence(channel_candidates, top_k=top_k)
         return UnifiedRetrievalResult(
@@ -119,17 +168,75 @@ class UnifiedRetrievalOrchestrator:
                 for channel in ("vector", "graph", "event")
             },
             graph_data=dict(graph_raw.get("data") or {}),
+            evidence_graph=evolink_result.evidence_graph,
             event_result=event_result,
             metadata={
                 "fusion": "document_rrf",
                 "rrf_k": 60,
                 "candidate_limit_per_path": candidate_limit,
-                "include_events": include_events,
+                "include_events": "event" in requested_channels,
+                "requested_channels": sorted(requested_channels),
                 "event_error": event_error,
+                "evolink_enabled": link_evidence,
+                "evolink_error": evolink_error,
+                "evolink": evolink_result.metadata,
                 "tkg_assertion_candidates": len(tkg_candidates),
                 "elapsed_ms": int((perf_counter() - started) * 1_000),
             },
         )
+
+    async def _coordinate_safely(
+        self,
+        plan: QueryPlan,
+        graph_raw: dict[str, Any],
+        event_candidates: list[EvidenceCandidate],
+        candidate_limit: int,
+        *,
+        enabled: bool,
+    ) -> tuple[EvoLinkResult, str | None]:
+        if not enabled:
+            return EvoLinkResult(), None
+        if self._evolink is None:
+            error = "Neo4j coordination graph is not configured"
+            if self._strict_coordination_failures:
+                raise RuntimeError(error)
+            return EvoLinkResult(), error
+        try:
+            return (
+                await self._evolink.coordinate(
+                    plan,
+                    entity_names=self._graph_entity_names(graph_raw),
+                    event_candidates=event_candidates,
+                    limit=candidate_limit,
+                ),
+                None,
+            )
+        except Exception as exc:
+            if self._strict_coordination_failures:
+                raise
+            logger.exception("EvoLink coordination unavailable; using base routes")
+            return EvoLinkResult(), f"{type(exc).__name__}: {exc}"
+
+    @staticmethod
+    def _graph_entity_names(raw: dict[str, Any]) -> list[str]:
+        values = (raw.get("data") or {}).get("entities") or []
+        names: list[str] = []
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+            name = next(
+                (
+                    str(value.get(key) or "").strip()
+                    for key in ("entity_name", "name", "entity")
+                    if value.get(key)
+                ),
+                "",
+            )
+            if name and name.casefold() not in {item.casefold() for item in names}:
+                names.append(name)
+            if len(names) >= 8:
+                break
+        return names
 
     async def _retrieve_tkg_graph_candidates(
         self,
@@ -208,6 +315,32 @@ class UnifiedRetrievalOrchestrator:
         merged: list[EvidenceCandidate] = []
         seen: set[tuple[str | None, str]] = set()
         for item in [*tkg, *base]:
+            key = (item.document_id, item.text.strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(
+                EvidenceCandidate(
+                    evidence_id=item.evidence_id,
+                    channel=item.channel,
+                    rank=len(merged) + 1,
+                    document_id=item.document_id,
+                    chunk_id=item.chunk_id,
+                    text=item.text,
+                    file_path=item.file_path,
+                    score=item.score,
+                    metadata=item.metadata,
+                )
+            )
+        return merged
+
+    @staticmethod
+    def _merge_channel_candidates(
+        *groups: list[EvidenceCandidate],
+    ) -> list[EvidenceCandidate]:
+        merged: list[EvidenceCandidate] = []
+        seen: set[tuple[str | None, str]] = set()
+        for item in (value for group in groups for value in group):
             key = (item.document_id, item.text.strip())
             if key in seen:
                 continue

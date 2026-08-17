@@ -5,6 +5,7 @@ import hashlib
 from rag_graph_demo.evaluation.models import RetrievedChunk
 
 AGENTIC_PROMPT_PROFILE_VERSION = "agentic_retrieval_variants_v2"
+EVONEED_PROMPT_PROFILE_VERSION = "ours_evoneed_v2"
 
 EVIDENCE_ASSESSMENT_SYSTEM = (
     "You are the evidence controller in an agentic RAG system. Judge only the supplied "
@@ -27,6 +28,46 @@ GROUNDED_ANSWER_SYSTEM = (
     "say what cannot be established and set insufficient_evidence to true. Do not cite IDs "
     "that are absent from the evidence. Event ordering alone does not establish causality."
 )
+
+EVONEED_PLAN_SYSTEM = """You are the knowledge-need planner for a training-free RAG
+system. Decompose the question into evidence needs; do not answer it and do not add
+unstated facts. Return one JSON object with analytic_goal, sufficient=false, needs,
+established_findings=[], conflicts=[], and stop_reason="".
+
+Each need has: need_id, knowledge_type, status="missing", query, route, rationale,
+entities, relations, event_types, start_time, end_time, missing_slots, and
+supported_evidence_ids=[]. Use only these mappings:
+- text_evidence -> vector: exact wording, numbers, conditions, quotations, or source text.
+- relation_evidence -> graph: entities, predicates, bridge relations, and multi-hop links.
+- evolution_evidence -> event: how an entity or relation changes through time.
+
+For evolution_evidence, missing_slots may use state_before, change_event,
+effective_time, state_after, stance_status, and supporting_source. Produce at most
+three non-overlapping needs. Needs represent evidence types, not individual sources:
+group multiple source-text anchors into one text_evidence need when possible. If the
+question asks whether a state, relation, focus, stance, or portrayal changed or
+remained consistent across time, always include one evolution_evidence need. Every
+query must preserve the named entities, dates, sources, and constraints relevant to
+that need. Return JSON only."""
+
+EVONEED_ASSESS_SYSTEM = """You are the evidence-gap controller for a training-free
+text--relation--event RAG system. Judge only the supplied evidence. Update the
+KnowledgeNeedState and return one JSON object with analytic_goal, sufficient, needs,
+established_findings, conflicts, and stop_reason.
+
+For every previous need, set status to satisfied only when cited evidence directly
+supports it; otherwise use partial or missing. Put valid supplied evidence IDs in
+supported_evidence_ids. For every remaining gap, write a focused next query and route:
+text_evidence->vector, relation_evidence->graph, evolution_evidence->event. Evolution
+needs must explicitly list any missing state_before, change_event, effective_time,
+state_after, stance_status, or supporting_source slots. Add a new need only when the
+current evidence exposes a necessary gap not represented previously. Use at most
+three open needs and do not infer that a fact is absent merely because retrieval did
+not find it. Every open need searched in the previous round must receive a materially
+different next query: retain its source, entity, date, and relation anchors, then add
+only the unresolved evidence slots or useful aliases. Never repeat the previous query
+verbatim. Mark sufficient=true only when every part of the analytic goal is grounded.
+Return JSON only."""
 
 
 def evidence_id(item: RetrievedChunk) -> str:
@@ -56,6 +97,18 @@ def prompt_profile_digest() -> str:
             AGENTIC_PROMPT_PROFILE_VERSION,
             EVIDENCE_ASSESSMENT_SYSTEM,
             QUERY_REWRITE_SYSTEM,
+            GROUNDED_ANSWER_SYSTEM,
+        )
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def evoneed_prompt_profile_digest() -> str:
+    payload = "\x1f".join(
+        (
+            EVONEED_PROMPT_PROFILE_VERSION,
+            EVONEED_PLAN_SYSTEM,
+            EVONEED_ASSESS_SYSTEM,
             GROUNDED_ANSWER_SYSTEM,
         )
     )

@@ -174,6 +174,33 @@ class CollectionRunner:
         self._finish(manifest, self.state_store.load(source_id), advance_cursor=False)
         return manifest
 
+    def run_candidates(
+        self,
+        source_id: str,
+        candidates: list[DiscoveryCandidate],
+    ) -> RunManifest:
+        """Run the evidence pipeline for externally discovered candidates.
+
+        Topic-driven discovery lives outside the deterministic collection
+        package.  This entry point lets it reuse policy, immutable raw storage,
+        parsing, validation, versioning, and clean publication without
+        pretending that search snippets are document bodies.
+        """
+        source = self.registry.get(source_id)
+        manifest = self._new_manifest("run", [source_id])
+        manifest.cursor_before = dict(self.state_store.load(source_id).cursor)
+        try:
+            with RunLock(self.collection_root / "state", source_id):
+                self._run_locked(source, manifest, None, provided_candidates=candidates)
+        except Exception as exc:
+            manifest.errors.append(RunError(stage="run", message=str(exc), retryable=True))
+            manifest.metrics.permanent_failures += 1
+        finally:
+            self._close_clients()
+        manifest.cursor_after = dict(self.state_store.load(source_id).cursor)
+        self._finish(manifest, self.state_store.load(source_id), advance_cursor=False)
+        return manifest
+
     def validate_record(self, record_id: str) -> dict[str, Any]:
         latest = self.record_store.load_latest(record_id)
         if latest is None:
@@ -188,6 +215,7 @@ class CollectionRunner:
         source: SourceConfig,
         manifest: RunManifest,
         candidate_urls: list[str] | None,
+        provided_candidates: list[DiscoveryCandidate] | None = None,
     ) -> None:
         metrics: RunMetrics = manifest.metrics
         state = self.state_store.load(source.source_id)
@@ -199,13 +227,18 @@ class CollectionRunner:
         )
         ctx = self._ctx()
 
-        try:
-            candidates = adapter.discover(source, state, ctx, fetcher)
-        except Exception as exc:
-            manifest.errors.append(RunError(stage="discover", message=str(exc), retryable=True))
-            metrics.retryable_failures += 1
-            self.state_store.save(state)
-            return
+        if provided_candidates is None:
+            try:
+                candidates = adapter.discover(source, state, ctx, fetcher)
+            except Exception as exc:
+                manifest.errors.append(
+                    RunError(stage="discover", message=str(exc), retryable=True)
+                )
+                metrics.retryable_failures += 1
+                self.state_store.save(state)
+                return
+        else:
+            candidates = provided_candidates
         metrics.discovered = len(candidates)
         if state.health.get("policy_skip"):
             metrics.policy_skipped += 1

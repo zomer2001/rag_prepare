@@ -1,0 +1,44 @@
+topic_id: counter_uas
+question: 全球反无人机系统的技术路线、主要企业、合同和部署进展
+
+keywords:
+  - counter-UAS
+  - C-UAS
+  - counter drone
+  - anti-drone
+  - 反无人机
+
+exclude_keywords:
+  - consumer accessory
+
+feeds:
+  - https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml
+  - https://www.twz.com/feed
+  - https://www.defenseone.com/rss/all/
+
+sitemaps:
+  - https://www.defensenews.com/arc/outboundfeeds/sitemap-index/?outputType=xml
+  - https://www.twz.com/sitemap_index.xml
+
+# Optional provider-neutral JSON search endpoint. Configure field paths to
+# match a licensed search API, then uncomment this block.
+# search:
+#   endpoint: https://search-provider.example/v1/search
+#   query_param: q
+#   page_param: page
+#   max_pages: 2
+#   result_path: results
+#   url_field: url
+#   title_field: title
+#   summary_field: description
+#   api_key_env: SEARCH_API_KEY
+#   api_key_header: Authorization
+#   api_key_prefix: "Bearer "
+
+max_rounds: 2
+max_candidates_per_round: 100
+max_fetches: 300
+max_queries_per_round: 10
+max_expansion_terms: 10
+rate_limit_seconds: 2.0
+use_llm: true

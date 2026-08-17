@@ -79,12 +79,20 @@ def render_query_response(response: dict[str, Any]) -> None:
         conflicts = response.get("event_conflicts") or []
         if conflicts:
             st.warning("事件索引发现来源立场冲突，请结合原文引用核验。")
+    evidence_graph = response.get("evidence_graph") or {}
+    if evidence_graph.get("nodes"):
+        st.subheader("本次决策证据图")
+        st.caption(
+            "蓝色为实体，绿色为语义断言，橙色为事件；红色边表示事件—实体/断言的跨通路连接。"
+        )
+        st.graphviz_chart(graph_to_dot(evidence_graph), use_container_width=True)
     with st.expander("检索上下文与调试数据"):
         st.json(
             {
                 "entities": response.get("entities") or [],
                 "relationships": response.get("relationships") or [],
                 "chunks": response.get("chunks") or [],
+                "evidence_graph": evidence_graph,
                 "metadata": response.get("metadata") or {},
             }
         )
@@ -95,17 +103,37 @@ def dot_escape(value: object) -> str:
 
 
 def graph_to_dot(graph: dict[str, Any]) -> str:
-    lines = ["graph knowledge {", "rankdir=LR;", "node [shape=box, style=rounded];"]
+    lines = [
+        "digraph knowledge {",
+        "rankdir=LR;",
+        'node [shape=box, style="rounded,filled", fontname="Arial"];',
+        'edge [fontname="Arial", color="#64748b"];',
+    ]
+    node_styles = {
+        "entity": ('ellipse', "#dbeafe", "#2563eb"),
+        "assertion": ('box', "#dcfce7", "#16a34a"),
+        "event": ('hexagon', "#ffedd5", "#ea580c"),
+    }
     for node in graph.get("nodes") or []:
         node_id = dot_escape(node.get("id", ""))
         labels = node.get("labels") or []
-        label = labels[0] if labels else node_id
-        lines.append(f'"{node_id}" [label="{dot_escape(label)}"];')
+        label = node.get("label") or (labels[0] if labels else node_id)
+        shape, fill, color = node_styles.get(
+            str(node.get("type") or ""),
+            ("box", "#f8fafc", "#64748b"),
+        )
+        lines.append(
+            f'"{node_id}" [label="{dot_escape(label)}", shape="{shape}", '
+            f'fillcolor="{fill}", color="{color}"];'
+        )
     for edge in graph.get("edges") or []:
         source = dot_escape(edge.get("source", ""))
         target = dot_escape(edge.get("target", ""))
         edge_type = dot_escape(edge.get("type") or "related")
-        lines.append(f'"{source}" -- "{target}" [label="{edge_type}"];')
+        color = "#dc2626" if edge.get("route") == "cross" else "#64748b"
+        lines.append(
+            f'"{source}" -> "{target}" [label="{edge_type}", color="{color}"];'
+        )
     lines.append("}")
     return "\n".join(lines)
 
@@ -227,6 +255,11 @@ with query_tab:
     chunk_top_k = col_chunk_k.slider("文本块召回", 1, 30, 10)
     enable_rerank = col_rerank.checkbox("启用 Reranker", value=False)
     use_events = st.checkbox("启用事件通路（时间筛选、事件链与冲突提示）", value=True)
+    evidence_linking = st.checkbox(
+        "启用 ours_evolink（Neo4j跨通路证据图）",
+        value=False,
+        disabled=not use_events,
+    )
     if st.button("开始问答", disabled=not question.strip(), type="primary"):
         with st.spinner("正在检索和生成答案…"):
             response = api_request(
@@ -239,6 +272,7 @@ with query_tab:
                     "chunk_top_k": chunk_top_k,
                     "enable_rerank": enable_rerank,
                     "use_events": use_events,
+                    "evidence_linking": evidence_linking,
                 },
                 timeout=300,
             )

@@ -366,6 +366,30 @@ async def test_orchestrator_runs_three_paths_with_shared_plan() -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_can_execute_one_selected_route() -> None:
+    engine = FakeRetrievalEngine()
+    orchestrator = UnifiedRetrievalOrchestrator(
+        engine,  # type: ignore[arg-type]
+        FakePlanner(),  # type: ignore[arg-type]
+        event_service=FakeEventService(),  # type: ignore[arg-type]
+        event_vector_index=FakeEventVector(),  # type: ignore[arg-type]
+    )
+
+    result = await orchestrator.retrieve(
+        "Acme exact announcement",
+        top_k=2,
+        include_events=False,
+        channels={"vector"},
+    )
+
+    assert engine.calls == [("naive", [], [])]
+    assert result.metadata["requested_channels"] == ["vector"]
+    assert result.candidates["vector"]
+    assert result.candidates["graph"] == ()
+    assert result.candidates["event"] == ()
+
+
+@pytest.mark.asyncio
 async def test_statement_tkg_augments_existing_graph_path_without_fourth_channel(
     tmp_path,
 ) -> None:

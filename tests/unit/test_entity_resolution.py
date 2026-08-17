@@ -128,3 +128,42 @@ async def test_embedding_gray_zone_calls_constrained_llm(tmp_path) -> None:
     assert result[0].action == ResolutionAction.MATCH_EXISTING
     assert result[0].decided_by == "llm"
     assert len(prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_open_schema_can_link_across_extracted_types(tmp_path) -> None:
+    async def embed(texts, context):
+        del context
+        assert len(texts) == 2
+        return np.asarray([[1.0, 0.0], [1.0, 0.0]])
+
+    async def complete(*_):
+        raise AssertionError("high-confidence open-schema match should not call LLM")
+
+    service = EntityResolutionService(
+        mapper(tmp_path),
+        embed,
+        complete,
+        enforce_type=False,
+        auto_match_threshold=0.94,
+    )
+    snapshot = TKGSnapshot(
+        ontology_version="0.1.0",
+        entities=[
+            EntityRecord(
+                entity_id="ent-google",
+                canonical_name="Google",
+                entity_type="Organization",
+                ontology_version="0.1.0",
+            )
+        ],
+    )
+
+    result = await service.resolve_batch(
+        snapshot,
+        [SemanticEntityCandidate(name="Google", entity_type="TechnologyCompany")],
+    )
+
+    assert result[0].action == ResolutionAction.MATCH_EXISTING
+    assert result[0].selected_entity_id == "ent-google"
+    assert result[0].normalized_type == "TechnologyCompany"

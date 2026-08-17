@@ -10,6 +10,7 @@ from rag_graph_demo.evaluation.models import (
 from rag_graph_demo.evaluation.runner import (
     EvaluationRunner,
     embedding_identity,
+    evoneed_diagnostics,
     light_entity_fingerprint,
     lightrag_benchmark_chunk_text,
     lightrag_benchmark_fingerprint,
@@ -43,6 +44,95 @@ def test_light_entity_and_ours_share_controlled_index_configuration(tmp_path) ->
     assert runner._method_retriever("ours", None, None).__func__ is (
         runner._retrieve_ours.__func__
     )
+
+
+def test_ours_evolink_is_a_distinct_controlled_three_path_method(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_evolink",),
+    )
+
+    assert runner._method_retriever(
+        "ours_evolink", None, None
+    ).__func__ is runner._retrieve_ours_evolink.__func__
+    assert runner.light_entity_engine is None
+    assert runner.tkg_graph_store is None
+    assert runner.evolink_graph_store is None
+
+
+def test_evolink_agentic_methods_are_registered_without_a_new_index(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("agentic_ours_evolink", "ours_evoneed"),
+    )
+
+    assert runner._method_retriever(
+        "agentic_ours_evolink", None, None
+    ).__func__ is runner._retrieve_agentic_ours_evolink.__func__
+    assert runner._method_retriever(
+        "ours_evoneed", None, None
+    ).__func__ is runner._retrieve_ours_evoneed.__func__
+    assert runner.tkg_vector_index is None
+
+
+def test_ours_tkg_has_no_controlled_lightrag_method_dependency(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_tkg",),
+    )
+
+    assert runner.light_entity_engine is None
+    assert runner.unified_orchestrator is None
+    assert runner.tkg_retriever is None
+
+
+def test_agentic_ours_tkg_has_no_legacy_graph_method_dependency(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("agentic_ours_tkg",),
+    )
+
+    assert runner.light_entity_engine is None
+    assert runner.unified_orchestrator is None
+    assert runner.event_service is None
+    assert runner.tkg_retriever is None
+    assert runner._method_retriever(
+        "agentic_ours_tkg", None, None
+    ).__func__ is runner._retrieve_agentic_ours_tkg.__func__
+
+
+def test_open_schema_mode_is_part_of_tkg_manifest(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(
+            _env_file=None,
+            embedding_provider="zhipu",
+            tkg_schema_mode="open",
+        ),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_tkg_dynamic",),
+    )
+
+    runner._ensure_output_manifest()
+    manifest = __import__("json").loads(
+        (tmp_path / "output" / "run_manifest.json").read_text()
+    )
+    assert manifest["tkg_profile"]["schema_mode"] == "open"
+    assert manifest["tkg_profile"]["schema_version"] == "open-v1"
+    assert manifest["tkg_profile"]["workspace"].endswith("_open")
 
 
 @pytest.mark.asyncio
@@ -270,3 +360,106 @@ def test_retrieval_diagnostics_reports_final_event_path_coverage() -> None:
     assert result["channel_query_counts"] == {"vector": 2, "graph": 2, "event": 1}
     assert result["channel_query_rates"]["event"] == 0.5
     assert result["mean_channel_documents"]["vector"] == 1.5
+
+
+def test_retrieval_diagnostics_reports_evolink_coordination() -> None:
+    rows = [
+        {
+            "retrieved": [
+                {
+                    "metadata": {
+                        "channels": ["vector", "graph", "event"],
+                        "evolink": {
+                            "seed_entity_count": 3,
+                            "seed_assertion_count": 4,
+                            "seed_event_count": 2,
+                            "linked_assertion_count": 5,
+                            "linked_event_count": 6,
+                            "linked_effect_count": 1,
+                            "graph_node_count": 12,
+                            "graph_edge_count": 14,
+                        },
+                    }
+                }
+            ]
+        },
+        {
+            "retrieved": [
+                {
+                    "metadata": {
+                        "channels": ["vector", "graph"],
+                        "evolink": {
+                            "seed_entity_count": 2,
+                            "linked_assertion_count": 3,
+                            "graph_node_count": 8,
+                            "graph_edge_count": 10,
+                        },
+                    }
+                }
+            ]
+        },
+    ]
+
+    result = retrieval_diagnostics(rows)["evolink_coordination"]
+
+    assert result["query_count"] == 2
+    assert result["seed_entity_count"] == 5
+    assert result["seed_assertion_count"] == 4
+    assert result["linked_assertion_count"] == 8
+    assert result["linked_event_count"] == 6
+    assert result["mean_graph_nodes"] == 10
+    assert result["mean_graph_edges"] == 12
+
+
+def test_evoneed_diagnostics_reports_typed_gaps_routes_and_closure() -> None:
+    rows = [
+        {
+            "trajectory": {
+                "events": [
+                    {
+                        "node": "plan_needs",
+                        "need_state": {
+                            "needs": [
+                                {
+                                    "knowledge_type": "text_evidence",
+                                    "status": "missing",
+                                },
+                                {
+                                    "knowledge_type": "evolution_evidence",
+                                    "status": "missing",
+                                },
+                            ]
+                        },
+                    },
+                    {
+                        "node": "retrieve_needs",
+                        "actions": [
+                            {"route": "vector"},
+                            {"route": "event"},
+                        ],
+                    },
+                    {
+                        "node": "answer",
+                        "final_need_state": {
+                            "sufficient": False,
+                            "needs": [
+                                {"status": "satisfied"},
+                                {"status": "missing"},
+                            ],
+                        },
+                    },
+                ]
+            }
+        }
+    ]
+
+    result = evoneed_diagnostics(rows)
+
+    assert result["route_action_counts"] == {
+        "vector": 1,
+        "graph": 0,
+        "event": 1,
+    }
+    assert result["initial_knowledge_type_counts"]["evolution_evidence"] == 1
+    assert result["need_closure_rate"] == 0.5
+    assert result["sufficient_rate"] == 0

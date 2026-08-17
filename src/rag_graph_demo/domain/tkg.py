@@ -299,6 +299,35 @@ class TKGQueryResponse(BaseModel):
     conflicts: list[ConflictCase] = Field(default_factory=list)
 
 
+class TKGExpansionRequest(BaseModel):
+    entity_ids: list[str] = Field(default_factory=list)
+    predicate_ids: list[str] = Field(default_factory=list)
+    assertion_ids: list[str] = Field(default_factory=list)
+    event_ids: list[str] = Field(default_factory=list)
+    entity_scores: dict[str, float] = Field(default_factory=dict)
+    predicate_scores: dict[str, float] = Field(default_factory=dict)
+    assertion_scores: dict[str, float] = Field(default_factory=dict)
+    event_scores: dict[str, float] = Field(default_factory=dict)
+    rank_by_seed_score: bool = False
+    start_time: str | None = None
+    end_time: str | None = None
+    include_inactive: bool = True
+    include_disputed: bool = True
+    expand_event_chain: bool = False
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class TKGExpansionResponse(BaseModel):
+    entities: list[EntityRecord] = Field(default_factory=list)
+    assertions: list[AssertionRecord] = Field(default_factory=list)
+    mentions: list[AssertionMention] = Field(default_factory=list)
+    events: list[dict] = Field(default_factory=list)
+    event_mentions: list[dict] = Field(default_factory=list)
+    event_links: list[dict] = Field(default_factory=list)
+    effects: list[EventEffect] = Field(default_factory=list)
+    conflicts: list[ConflictCase] = Field(default_factory=list)
+
+
 class ReviewDecisionRequest(BaseModel):
     action: ResolutionAction
     selected_entity_id: str | None = None

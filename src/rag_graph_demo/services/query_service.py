@@ -85,10 +85,15 @@ class QueryService:
 
     async def _query_unified(self, request: QueryRequest) -> QueryResponse:
         started = perf_counter()
+        retrieval_kwargs = {
+            "top_k": request.chunk_top_k,
+            "include_events": request.use_events,
+        }
+        if request.evidence_linking:
+            retrieval_kwargs["link_evidence"] = True
         retrieval = await self._orchestrator.retrieve(
             request.question,
-            top_k=request.chunk_top_k,
-            include_events=request.use_events,
+            **retrieval_kwargs,
         )
         context, citations = await self._build_unified_context(retrieval)
         prompt = (
@@ -126,6 +131,7 @@ class QueryService:
                 if event_result
                 else []
             ),
+            evidence_graph=retrieval.evidence_graph,
             metadata={
                 **retrieval.metadata,
                 "query_plan": retrieval.plan.model_dump(mode="json"),

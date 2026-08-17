@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
@@ -16,6 +17,7 @@ from rag_graph_demo.domain.tkg import (
 from rag_graph_demo.storage.atomic_json import read_json, write_json_atomic
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 class TKGRegistry:
@@ -139,6 +141,25 @@ class TKGRegistry:
         raw = read_json(self._path, default=None)
         if raw is None:
             return TKGSnapshot(ontology_version=self._ontology_version)
+        repaired = 0
+        for assertion in raw.get("assertions", []):
+            valid_from = assertion.get("valid_from")
+            valid_to = assertion.get("valid_to")
+            if valid_from and valid_to and valid_from > valid_to:
+                stated_valid_to = assertion.get("stated_valid_to")
+                assertion["valid_to"] = (
+                    stated_valid_to
+                    if stated_valid_to and stated_valid_to >= valid_from
+                    else None
+                )
+                assertion["invalidated_at"] = None
+                repaired += 1
+        if repaired:
+            logger.warning(
+                "Repaired %d legacy assertion interval(s) before validation: %s",
+                repaired,
+                self._path,
+            )
         snapshot = TKGSnapshot.model_validate(raw)
         if snapshot.ontology_version != self._ontology_version:
             raise ValueError(
@@ -212,6 +233,14 @@ class TKGRegistry:
                     continue
                 if effect.effect_type.value in {"creates", "confirms", "updates"}:
                     assertion.status = AssertionStatus.ACTIVE
+                    if (
+                        assertion.stated_valid_to is None
+                        and assertion.valid_to
+                        and effect.effective_time
+                        and effect.effective_time > assertion.valid_to
+                    ):
+                        assertion.valid_to = None
+                        assertion.invalidated_at = None
                 elif effect.effect_type.value == "denies":
                     assertion.status = AssertionStatus.DISPUTED
                 elif effect.effect_type.value == "terminates":
@@ -222,6 +251,24 @@ class TKGRegistry:
                     assertion.status = AssertionStatus.SUPERSEDED
                     assertion.valid_to = effect.effective_time
                     assertion.invalidated_at = effect.created_at
+            if (
+                assertion.valid_from
+                and assertion.valid_to
+                and assertion.valid_from > assertion.valid_to
+            ):
+                logger.warning(
+                    "Discarding inverted derived interval for assertion %s: %s > %s",
+                    assertion.assertion_id,
+                    assertion.valid_from,
+                    assertion.valid_to,
+                )
+                assertion.valid_to = None
+                assertion.invalidated_at = None
+                if assertion.status in {
+                    AssertionStatus.INACTIVE,
+                    AssertionStatus.SUPERSEDED,
+                }:
+                    assertion.status = AssertionStatus.DISPUTED
             if mentions:
                 assertion.confidence = round(
                     sum(item.extractor_confidence for item in mentions) / len(mentions), 3
