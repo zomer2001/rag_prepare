@@ -23,8 +23,10 @@ data/exports/*
 data/logs/*
 data/collection/*
 data/benchmarks/*
+data/tkg/*
 !data/**/.gitkeep
 
 qdrant_storage/
 neo4j_storage/
 models/
+tmp/
