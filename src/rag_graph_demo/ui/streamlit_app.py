@@ -8,6 +8,12 @@ import httpx
 import streamlit as st
 
 API_BASE_URL = os.getenv("RAG_API_BASE_URL", "http://127.0.0.1:8000/api/v1")
+SHOW_EVOLINK = os.getenv("RAG_SHOW_EVOLINK", "true").strip().casefold() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 QUERY_MODES = {
     "综合检索（推荐）": "mix",
     "纯向量检索": "naive",
@@ -255,11 +261,13 @@ with query_tab:
     chunk_top_k = col_chunk_k.slider("文本块召回", 1, 30, 10)
     enable_rerank = col_rerank.checkbox("启用 Reranker", value=False)
     use_events = st.checkbox("启用事件通路（时间筛选、事件链与冲突提示）", value=True)
-    evidence_linking = st.checkbox(
-        "启用 ours_evolink（Neo4j跨通路证据图）",
-        value=False,
-        disabled=not use_events,
-    )
+    evidence_linking = False
+    if SHOW_EVOLINK:
+        evidence_linking = st.checkbox(
+            "启用 ours_evolink（Neo4j跨通路证据图）",
+            value=False,
+            disabled=not use_events,
+        )
     if st.button("开始问答", disabled=not question.strip(), type="primary"):
         with st.spinner("正在检索和生成答案…"):
             response = api_request(

@@ -24,6 +24,9 @@ data/logs/*
 data/collection/*
 data/benchmarks/*
 data/tkg/*
+data/eventrag/*
+data/e2rag/*
+data/demo_data_runtime/*
 !data/**/.gitkeep
 
 qdrant_storage/

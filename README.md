@@ -9,6 +9,10 @@
 - [`PROJECT_PLAN.md`](PROJECT_PLAN.md)：初始架构与选型论证。
 - [`TECHNICAL_REPORT.md`](TECHNICAL_REPORT.md)：当前架构、三通路索引、查询协同、
   存储、验证和演进路线。
+- [`reports/2026-08-25_data_pipeline/数据管线专项技术报告.md`](reports/2026-08-25_data_pipeline/数据管线专项技术报告.md)：
+  截至 2026-08-25 的数据发现、采集、解析、去重、版本化、质量控制和课题驱动 OSINT 实现报告。
+- [`reports/2026-09-02/EvoLink现状与本体建模差距报告.md`](reports/2026-09-02/EvoLink现状与本体建模差距报告.md)：
+  截至 2026-09-02 的 EvoLink 创新、实现、指标边界，以及静态/动态本体建模差距。
 - [`THREE_PATH_FUSION_TECHNICAL_REPORT.md`](THREE_PATH_FUSION_TECHNICAL_REPORT.md)：
   文本向量、语义图谱和事件三路从索引、召回到文档级证据融合的专项技术报告。
 - [`RUNBOOK.md`](RUNBOOK.md)：可逐行执行的采集、索引、事件补建、验收和恢复流程。
