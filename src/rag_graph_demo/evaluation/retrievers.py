@@ -127,7 +127,7 @@ class HybridRetriever:
         self,
         dense: DenseRetriever,
         *,
-        candidate_multiplier: int = 4,
+        candidate_multiplier: int = 1,
         rrf_k: int = 60,
     ) -> None:
         try:

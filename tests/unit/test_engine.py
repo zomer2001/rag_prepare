@@ -96,6 +96,7 @@ async def test_light_entity_profile_applies_prompt_and_precision_limits(
     assert captured["entity_extract_max_entities"] == 9
     assert captured["entity_extract_max_records"] == 21
     assert captured["embedding_func_max_async"] == settings.effective_embedding_concurrency
+    assert captured["default_embedding_timeout"] == 120
     assert captured["max_parallel_insert"] == settings.graph_index_concurrency
     assert captured["addon_params"]["entity_type_prompt_file"] == "entity.yaml"
     assert engine_module.os.environ["PROMPT_DIR"] == str(prompt_file.parent.parent.resolve())

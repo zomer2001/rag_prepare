@@ -121,6 +121,13 @@ async def test_evolink_connects_event_entity_assertion_and_source_evidence() -> 
 
     assert store.last_expansion.entity_ids == ["entity-acme", "entity-orbit"]
     assert store.last_expansion.event_ids == ["event-launch"]
+    assert store.last_expansion.rank_by_seed_score is True
+    assert store.last_expansion.entity_scores == {
+        "entity-acme": 1.0,
+        "entity-orbit": 0.5,
+    }
+    assert store.last_expansion.assertion_scores == {"assertion-launch": 1.0}
+    assert store.last_expansion.event_scores == {"event-launch": 1.0}
     assert result.graph_candidates[0].document_id == "doc-semantic"
     assert result.event_candidates[0].document_id == "doc-event"
     assert {item["type"] for item in result.evidence_graph["nodes"]} == {
@@ -138,3 +145,55 @@ async def test_evolink_connects_event_entity_assertion_and_source_evidence() -> 
         ("event-launch", "assertion-launch", "CREATES"),
     }
     assert result.metadata["linked_effect_count"] == 1
+    assert result.metadata["expansion_limit"] == 10
+
+
+class BroadSeedStore:
+    def __init__(self) -> None:
+        self.queries = []
+        self.last_expansion = None
+
+    async def query(self, request):
+        self.queries.append(request)
+        return TKGQueryResponse(
+            entities=[
+                EntityRecord(
+                    entity_id=f"{request.entity_name}-{index}",
+                    canonical_name=f"{request.entity_name} {index}",
+                    entity_type="Concept",
+                    ontology_version="0.1.0",
+                )
+                for index in range(1, 4)
+            ]
+        )
+
+    async def expand(self, request):
+        self.last_expansion = request
+        return TKGExpansionResponse()
+
+
+@pytest.mark.asyncio
+async def test_evolink_filters_generic_names_and_round_robins_seed_budget() -> None:
+    store = BroadSeedStore()
+    coordinator = EvoLinkCoordinator(
+        store,
+        seed_limit_per_name=3,
+        max_entity_names=8,
+    )
+
+    result = await coordinator.coordinate(
+        QueryPlan(entities=["company", "Acme"]),
+        entity_names=["Orbit"],
+        limit=4,
+    )
+
+    assert [request.entity_name for request in store.queries] == ["Acme", "Orbit"]
+    assert all(request.limit == 3 for request in store.queries)
+    assert store.last_expansion.entity_ids == [
+        "Acme-1",
+        "Orbit-1",
+        "Acme-2",
+        "Orbit-2",
+    ]
+    assert store.last_expansion.rank_by_seed_score is True
+    assert result.metadata["entity_names"] == ["Acme", "Orbit"]

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from rag_graph_demo.agentic.graph import AgenticRAGGraph
-from rag_graph_demo.agentic.model import extract_json_object
+from rag_graph_demo.agentic.model import DeepSeekAgentModel, extract_json_object
 from rag_graph_demo.agentic.models import (
     AgenticRun,
     EvidenceAssessment,
@@ -126,6 +128,53 @@ def test_agentic_json_parser_accepts_fenced_output() -> None:
     assert extract_json_object('```json\n{"sufficient": true}\n```') == {
         "sufficient": True
     }
+
+
+@pytest.mark.asyncio
+async def test_agentic_json_call_retries_truncated_output(monkeypatch) -> None:
+    invalid = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content='{"relevant": true, "reason": "cut'),
+                finish_reason="length",
+            )
+        ],
+        usage=None,
+    )
+    valid = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=(
+                        '{"relevant": true, "sufficient": false, '
+                        '"reason": "retry", "missing_information": "evidence"}'
+                    )
+                ),
+                finish_reason="stop",
+            )
+        ],
+        usage=None,
+    )
+    create = AsyncMock(side_effect=[invalid, valid])
+    model = DeepSeekAgentModel(
+        Settings(_env_file=None, deepseek_api_key="test", llm_max_retries=2)
+    )
+    model.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    monkeypatch.setattr(
+        "rag_graph_demo.agentic.model.asyncio.sleep", AsyncMock()
+    )
+
+    call = await model._json_call(
+        EvidenceAssessment,
+        "Return JSON.",
+        "Question?",
+        model="test-model",
+    )
+
+    assert call.value.reason == "retry"
+    assert create.await_count == 2
 
 
 def _dataset() -> BenchmarkDataset:

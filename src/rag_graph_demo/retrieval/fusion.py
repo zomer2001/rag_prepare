@@ -12,9 +12,13 @@ def fuse_evidence(
     top_k: int,
     rrf_k: int = 60,
     passages_per_document: int = 3,
+    linked_candidate_weight: float = 0.1,
 ) -> list[EvidenceBundle]:
-    """Fuse incomparable channel scores by rank, then retain traceable passages."""
+    """Fuse path ranks while treating cross-view expansion as one bounded bonus."""
+    if not 0 <= linked_candidate_weight <= 1:
+        raise ValueError("linked_candidate_weight must be between 0 and 1")
     scores: dict[str, float] = defaultdict(float)
+    linked_scores: dict[str, float] = defaultdict(float)
     grouped: dict[str, list[EvidenceCandidate]] = defaultdict(list)
     channel_order = {"vector": 0, "graph": 1, "event": 2}
     for _channel, values in channel_candidates.items():
@@ -26,7 +30,19 @@ def fuse_evidence(
             if candidate.document_id in seen_documents:
                 continue
             seen_documents.add(candidate.document_id)
-            scores[candidate.document_id] += 1.0 / (rrf_k + candidate.rank)
+            rank_score = 1.0 / (rrf_k + candidate.rank)
+            if candidate.metadata.get("linked_by") == "ours_evolink":
+                # Graph and event expansion are correlated views of one link. Count
+                # only the strongest link once instead of awarding another full path.
+                linked_scores[candidate.document_id] = max(
+                    linked_scores[candidate.document_id],
+                    rank_score,
+                )
+            else:
+                scores[candidate.document_id] += rank_score
+
+    for document_id, linked_score in linked_scores.items():
+        scores[document_id] += linked_candidate_weight * linked_score
 
     ordered_documents = sorted(
         scores,

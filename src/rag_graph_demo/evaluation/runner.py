@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
@@ -45,7 +46,12 @@ from rag_graph_demo.lightrag_engine.local_models import (
     embedding_model_name,
 )
 from rag_graph_demo.retrieval.event_vector import EventVectorIndex
-from rag_graph_demo.retrieval.models import RetrievalChannel
+from rag_graph_demo.retrieval.fusion import fuse_evidence
+from rag_graph_demo.retrieval.models import (
+    QueryPlan,
+    RetrievalChannel,
+    UnifiedRetrievalResult,
+)
 from rag_graph_demo.retrieval.orchestrator import UnifiedRetrievalOrchestrator
 from rag_graph_demo.retrieval.planner import (
     QUERY_PLANNER_PROFILE_VERSION,
@@ -77,6 +83,7 @@ from rag_graph_demo.storage.neo4j_tkg_store import Neo4jTKGStore
 from rag_graph_demo.storage.tkg_registry import TKGRegistry
 
 logger = logging.getLogger(__name__)
+CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER = 1
 
 VALID_METHODS = (
     "naive",
@@ -86,6 +93,10 @@ VALID_METHODS = (
     "ours",
     "ours_evolink",
     "ours_evoneed",
+    "ours_evoneed_planned",
+    "ours_evoneed_planned_shared",
+    "ours_evoneed_equal",
+    "ours_evoneed_dynamic",
     "ours_tkg",
     "ours_tkg_dynamic",
     "agentic_hybrid",
@@ -101,6 +112,10 @@ AGENTIC_METHODS = {
     "agentic_ours",
     "agentic_ours_evolink",
     "ours_evoneed",
+    "ours_evoneed_planned",
+    "ours_evoneed_planned_shared",
+    "ours_evoneed_equal",
+    "ours_evoneed_dynamic",
     "agentic_ours_tkg",
     "agentic_ours_tkg_dynamic",
 }
@@ -109,6 +124,10 @@ CONTROLLED_METHODS = {
     "ours",
     "ours_evolink",
     "ours_evoneed",
+    "ours_evoneed_planned",
+    "ours_evoneed_planned_shared",
+    "ours_evoneed_equal",
+    "ours_evoneed_dynamic",
     "agentic_light_entity",
     "agentic_ours",
     "agentic_ours_evolink",
@@ -117,11 +136,29 @@ EVENT_METHODS = {
     "ours",
     "ours_evolink",
     "ours_evoneed",
+    "ours_evoneed_planned",
+    "ours_evoneed_planned_shared",
+    "ours_evoneed_equal",
+    "ours_evoneed_dynamic",
     "agentic_ours",
     "agentic_ours_evolink",
 }
-EVOLINK_METHODS = {"ours_evolink", "ours_evoneed", "agentic_ours_evolink"}
-EVONEED_METHODS = {"ours_evoneed"}
+EVOLINK_METHODS = {
+    "ours_evolink",
+    "ours_evoneed",
+    "ours_evoneed_planned",
+    "ours_evoneed_planned_shared",
+    "ours_evoneed_equal",
+    "ours_evoneed_dynamic",
+    "agentic_ours_evolink",
+}
+EVONEED_METHODS = {
+    "ours_evoneed",
+    "ours_evoneed_planned",
+    "ours_evoneed_planned_shared",
+    "ours_evoneed_equal",
+    "ours_evoneed_dynamic",
+}
 TKG_METHODS = {
     "ours_tkg",
     "ours_tkg_dynamic",
@@ -130,7 +167,8 @@ TKG_METHODS = {
 }
 DENSE_METHODS = {"naive", "hybrid", "agentic_hybrid"}
 HYBRID_METHODS = {"hybrid", "agentic_hybrid"}
-UNIFIED_RETRIEVAL_PROFILE_VERSION = "three_path_v2_soft_event_hints"
+UNIFIED_RETRIEVAL_PROFILE_VERSION = "three_path_v3_route_top20"
+EVOLINK_RETRIEVAL_PROFILE_VERSION = "ours_evolink_v3_single_shared_expansion"
 TKG_RETRIEVAL_PROFILE_VERSION = "unified_statement_tkg_v1"
 LIGHTRAG_BENCHMARK_INPUT_VERSION = "unique_chunk_identity_v1"
 
@@ -343,6 +381,13 @@ class EvaluationRunner:
                 document_id_resolver=resolve_document_id,
                 strict_event_failures=True,
                 strict_coordination_failures=True,
+                evolink_seed_limit_per_name=(
+                    self.eval_settings.evolink_seed_limit_per_name
+                ),
+                evolink_max_entity_names=self.eval_settings.evolink_max_entity_names,
+                evolink_max_event_seeds=self.eval_settings.evolink_max_event_seeds,
+                evolink_expansion_limit=self.eval_settings.evolink_expansion_limit,
+                evolink_link_weight=self.eval_settings.evolink_link_weight,
             )
         if EVOLINK_METHODS & set(self.methods):
             await self._ensure_evolink_index()
@@ -356,7 +401,14 @@ class EvaluationRunner:
         if TKG_METHODS & set(self.methods):
             await self._ensure_tkg_index()
         if AGENTIC_METHODS & set(self.methods):
-            agent_model = DeepSeekAgentModel(self.eval_settings)
+            agent_model = DeepSeekAgentModel(
+                self.eval_settings,
+                plan_cache_path=(
+                    self.runtime_dir
+                    / "events"
+                    / f"evoneed_plan_cache_{EVONEED_PROMPT_PROFILE_VERSION}.json"
+                ),
+            )
             if "agentic_hybrid" in self.methods:
                 assert hybrid is not None
                 self.agentic_graphs["agentic_hybrid"] = AgenticRAGGraph(
@@ -380,8 +432,37 @@ class EvaluationRunner:
                 )
             if "ours_evoneed" in self.methods:
                 self.agentic_graphs["ours_evoneed"] = EvoNeedRAGGraph(
-                    self._retrieve_evoneed_action,
+                    self._retrieve_evoneed_actions,
                     agent_model,
+                )
+            if "ours_evoneed_planned" in self.methods:
+                self.agentic_graphs["ours_evoneed_planned"] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_actions,
+                    agent_model,
+                    initial_retrieval="planned_needs",
+                )
+            if "ours_evoneed_planned_shared" in self.methods:
+                self.agentic_graphs["ours_evoneed_planned_shared"] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_actions,
+                    agent_model,
+                    initial_retrieval="planned_needs",
+                    route_budget_mode="shared_total",
+                    minimum_route_budget=self.eval_settings.evoneed_min_route_budget,
+                )
+            if "ours_evoneed_equal" in self.methods:
+                self.agentic_graphs["ours_evoneed_equal"] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_actions,
+                    agent_model,
+                    initial_retrieval="planned_needs",
+                    route_budget_mode="equal_total",
+                )
+            if "ours_evoneed_dynamic" in self.methods:
+                self.agentic_graphs["ours_evoneed_dynamic"] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_actions,
+                    agent_model,
+                    initial_retrieval="planned_needs",
+                    route_budget_mode="planned_total",
+                    minimum_route_budget=self.eval_settings.evoneed_min_route_budget,
                 )
             if "agentic_ours_tkg" in self.methods:
                 if self.tkg_retriever is None:
@@ -436,7 +517,9 @@ class EvaluationRunner:
                 result["tkg_retrieval_profile"] = TKG_RETRIEVAL_PROFILE_VERSION
                 result["tkg_query_planner_profile"] = TKG_QUERY_PLANNER_PROFILE_VERSION
             if EVOLINK_METHODS & set(self.methods):
-                result["evolink_retrieval_profile"] = "ours_evolink_v1"
+                result["evolink_retrieval_profile"] = (
+                    EVOLINK_RETRIEVAL_PROFILE_VERSION
+                )
             (self.output_dir / "summary.json").write_text(
                 json.dumps(result, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -482,6 +565,14 @@ class EvaluationRunner:
             return self._retrieve_ours_evolink
         if method == "ours_evoneed":
             return self._retrieve_ours_evoneed
+        if method == "ours_evoneed_planned":
+            return self._retrieve_ours_evoneed_planned
+        if method == "ours_evoneed_planned_shared":
+            return self._retrieve_ours_evoneed_planned_shared
+        if method == "ours_evoneed_equal":
+            return self._retrieve_ours_evoneed_equal
+        if method == "ours_evoneed_dynamic":
+            return self._retrieve_ours_evoneed_dynamic
         if method == "ours_tkg":
             if self.tkg_retriever is None:
                 raise RuntimeError("Unified TKG retriever is not initialized")
@@ -849,6 +940,20 @@ class EvaluationRunner:
             else set()
         )
         events = await self.event_service.list_events()
+        events_by_document: dict[str, list] = defaultdict(list)
+        for event in events:
+            for document_id in event.source_document_ids:
+                events_by_document[document_id].append(event)
+        pending_documents = [
+            document
+            for document in self.documents
+            if document.document_id not in completed
+        ]
+        semantics_by_document = (
+            await self.light_entity_engine.get_documents_semantic_extractions(
+                [document.document_id for document in pending_documents]
+            )
+        )
         progress = tqdm(
             total=len(self.documents),
             initial=len(completed),
@@ -858,24 +963,20 @@ class EvaluationRunner:
             disable=not self.show_progress,
         )
         try:
-            for document in self.documents:
-                if document.document_id in completed:
-                    continue
-                semantic = (
-                    await self.light_entity_engine.get_document_semantic_extraction(
-                        document.document_id
-                    )
-                )
-                document_events = [
-                    event
-                    for event in events
-                    if document.document_id in event.source_document_ids
-                ]
-                await fusion.index_document(
-                    document.document_id,
-                    document.title,
-                    semantic,
-                    document_events,
+            for document in pending_documents:
+                semantic = semantics_by_document[document.document_id]
+                document_events = events_by_document.get(document.document_id, [])
+                await _retry_timeout(
+                    lambda document=document,
+                    semantic=semantic,
+                    document_events=document_events: fusion.index_document(
+                        document.document_id,
+                        document.title,
+                        semantic,
+                        document_events,
+                    ),
+                    attempts=max(2, self.eval_settings.embedding_max_retries + 1),
+                    label=f"EvoLink governance for {document.document_id}",
                 )
                 completed.add(document.document_id)
                 write_json_atomic(
@@ -1152,25 +1253,158 @@ class EvaluationRunner:
     ) -> AgenticRun:
         return await self._retrieve_agentic("ours_evoneed", question, top_k)
 
-    async def _retrieve_evoneed_action(
+    async def _retrieve_ours_evoneed_planned(
         self,
-        need: NeedItem,
+        question: str,
         top_k: int,
-    ) -> list[RetrievedChunk]:
-        if need.need_id == "need_question_anchor":
-            return await self._retrieve_unified(
-                need.query,
-                top_k,
-                include_events=True,
-                link_evidence=True,
-                channels=None,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic(
+            "ours_evoneed_planned", question, top_k
+        )
+
+    async def _retrieve_ours_evoneed_planned_shared(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic(
+            "ours_evoneed_planned_shared", question, top_k
+        )
+
+    async def _retrieve_ours_evoneed_equal(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic("ours_evoneed_equal", question, top_k)
+
+    async def _retrieve_ours_evoneed_dynamic(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic("ours_evoneed_dynamic", question, top_k)
+
+    async def _retrieve_evoneed_actions(
+        self,
+        needs: list[NeedItem],
+        budgets: list[int],
+    ) -> list[list[RetrievedChunk]]:
+        """Execute planned routes, then apply EvoLink exactly once to the batch."""
+        if self.unified_orchestrator is None:
+            raise RuntimeError("Unified retrieval orchestrator is not initialized")
+        if len(needs) != len(budgets):
+            raise ValueError("EvoNeed needs and budgets must have the same length")
+        if len(needs) == 1 and needs[0].need_id == "need_question_anchor":
+            return [
+                await self._retrieve_unified(
+                    needs[0].query,
+                    budgets[0],
+                    include_events=True,
+                    link_evidence=True,
+                    channels=None,
+                    candidate_multiplier=CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
+                )
+            ]
+
+        plans = [self._query_plan_from_need(need) for need in needs]
+        results = await asyncio.gather(
+            *(
+                self.unified_orchestrator.retrieve(
+                    need.query,
+                    top_k=budget,
+                    include_events=need.route == "event",
+                    link_evidence=False,
+                    candidate_multiplier=CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
+                    channels={need.route},
+                    plan_override=plan,
+                )
+                for need, budget, plan in zip(needs, budgets, plans, strict=True)
             )
-        return await self._retrieve_unified(
-            need.query,
-            top_k,
-            include_events=need.route == "event",
-            link_evidence=True,
-            channels={need.route},
+        )
+        evolink, evolink_error = await self.unified_orchestrator.coordinate_planned_results(
+            plans,
+            results,
+            limit=self.eval_settings.evolink_expansion_limit,
+        )
+
+        candidates = [
+            {channel: list(values) for channel, values in result.candidates.items()}
+            for result in results
+        ]
+        graph_target = next(
+            (index for index, need in enumerate(needs) if need.route == "graph"),
+            None,
+        )
+        event_target = next(
+            (index for index, need in enumerate(needs) if need.route == "event"),
+            None,
+        )
+        fallback_target = 0 if needs else None
+        if evolink.graph_candidates and fallback_target is not None:
+            target = graph_target if graph_target is not None else (
+                event_target if event_target is not None else fallback_target
+            )
+            candidates[target]["graph"] = [
+                *candidates[target].get("graph", []),
+                *evolink.graph_candidates,
+            ]
+        if evolink.event_candidates and fallback_target is not None:
+            target = event_target if event_target is not None else (
+                graph_target if graph_target is not None else fallback_target
+            )
+            candidates[target]["event"] = [
+                *candidates[target].get("event", []),
+                *evolink.event_candidates,
+            ]
+
+        batches: list[list[RetrievedChunk]] = []
+        for result, plan, budget, channel_candidates in zip(
+            results, plans, budgets, candidates, strict=True
+        ):
+            bundles = fuse_evidence(
+                channel_candidates,
+                top_k=budget,
+                linked_candidate_weight=self.eval_settings.evolink_link_weight,
+            )
+            coordinated = UnifiedRetrievalResult(
+                plan=plan,
+                bundles=tuple(bundles),
+                candidates={
+                    channel: tuple(channel_candidates.get(channel, []))
+                    for channel in ("vector", "graph", "event")
+                },
+                graph_data=result.graph_data,
+                evidence_graph=evolink.evidence_graph,
+                event_result=result.event_result,
+                metadata={
+                    **result.metadata,
+                    "evolink_enabled": True,
+                    "evolink_error": evolink_error,
+                    "evolink": evolink.metadata,
+                    "evolink_scope": "one_shared_expansion_per_need_batch",
+                },
+            )
+            batches.append(self._unified_result_to_chunks(coordinated))
+        return batches
+
+    @staticmethod
+    def _query_plan_from_need(need: NeedItem) -> QueryPlan:
+        low_keywords = need.low_level_keywords or list(need.entities)
+        high_keywords = need.high_level_keywords or [
+            *need.relations,
+            *need.event_types,
+        ]
+        return QueryPlan(
+            low_level_keywords=list(dict.fromkeys(low_keywords))[:12],
+            high_level_keywords=list(dict.fromkeys(high_keywords))[:12],
+            relations=list(dict.fromkeys(need.relations))[:6],
+            entities=list(dict.fromkeys(need.entities))[:6],
+            event_types=list(dict.fromkeys(need.event_types))[:6],
+            start_time=need.start_time,
+            end_time=need.end_time,
+            state_intents=list(dict.fromkeys(need.state_intents))[:6],
+            expand_event_chain=need.expand_event_chain,
         )
 
     async def _retrieve_agentic_ours_tkg(
@@ -1208,13 +1442,20 @@ class EvaluationRunner:
         graph = self.agentic_graphs.get(method)
         if graph is None:
             raise RuntimeError(f"Agentic graph is not initialized for {method}")
-        return await graph.run(
-            question,
-            top_k=top_k,
-            context_k=top_k,
-            max_retrieval_rounds=self.eval_settings.agentic_max_retrieval_rounds,
-            rrf_k=self.eval_settings.agentic_rrf_k,
-        )
+        run_kwargs = {
+            "top_k": top_k,
+            "context_k": top_k,
+            "max_retrieval_rounds": self.eval_settings.agentic_max_retrieval_rounds,
+            "rrf_k": self.eval_settings.agentic_rrf_k,
+        }
+        if method in EVONEED_METHODS:
+            return await graph.run(
+                question,
+                retrieval_budget=self.eval_settings.evoneed_retrieval_budget,
+                retrieval_only=True,
+                **run_kwargs,
+            )
+        return await graph.run(question, **run_kwargs)
 
     async def _retrieve_unified(
         self,
@@ -1224,6 +1465,8 @@ class EvaluationRunner:
         include_events: bool,
         link_evidence: bool = False,
         channels: set[RetrievalChannel] | None = None,
+        candidate_multiplier: int = CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
+        plan_override: QueryPlan | None = None,
     ) -> list[RetrievedChunk]:
         if self.unified_orchestrator is None:
             raise RuntimeError("Unified retrieval orchestrator is not initialized")
@@ -1232,8 +1475,16 @@ class EvaluationRunner:
             top_k=top_k,
             include_events=include_events,
             link_evidence=link_evidence,
+            candidate_multiplier=candidate_multiplier,
             channels=channels,
+            plan_override=plan_override,
         )
+        return self._unified_result_to_chunks(result)
+
+    @staticmethod
+    def _unified_result_to_chunks(
+        result: UnifiedRetrievalResult,
+    ) -> list[RetrievedChunk]:
         return [
             RetrievedChunk(
                 chunk_id=(
@@ -1282,6 +1533,9 @@ class EvaluationRunner:
             "chunk_overlap": self.chunk_overlap,
             "embedding_model_id": embedding_identity(self.eval_settings),
             "retrieval_profile": UNIFIED_RETRIEVAL_PROFILE_VERSION,
+            "controlled_route_candidate_multiplier": (
+                CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER
+            ),
             "query_planner_profile": QUERY_PLANNER_PROFILE_VERSION,
         }
         if TKG_METHODS & set(self.methods):
@@ -1315,6 +1569,17 @@ class EvaluationRunner:
                 "rrf_k": self.eval_settings.agentic_rrf_k,
                 "methods": sorted(set(self.methods) & AGENTIC_METHODS),
             }
+        if EVOLINK_METHODS & set(self.methods):
+            expected["evolink_profile"] = {
+                "version": EVOLINK_RETRIEVAL_PROFILE_VERSION,
+                "seed_limit_per_name": (
+                    self.eval_settings.evolink_seed_limit_per_name
+                ),
+                "max_entity_names": self.eval_settings.evolink_max_entity_names,
+                "max_event_seeds": self.eval_settings.evolink_max_event_seeds,
+                "expansion_limit": self.eval_settings.evolink_expansion_limit,
+                "link_weight": self.eval_settings.evolink_link_weight,
+            }
         if EVONEED_METHODS & set(self.methods):
             expected["evoneed_profile"] = {
                 "version": EVONEED_PROMPT_PROFILE_VERSION,
@@ -1325,8 +1590,50 @@ class EvaluationRunner:
                     "evolution_evidence",
                 ],
                 "selective_routes": ["vector", "graph", "event"],
-                "cross_path_expansion": "evolink",
+                "joint_planner_calls_per_query": 1,
+                "cross_path_expansion": "one_shared_evolink_after_all_routes",
+                "initial_retrieval_budget": self.eval_settings.evoneed_retrieval_budget,
+                "minimum_active_route_budget": (
+                    self.eval_settings.evoneed_min_route_budget
+                ),
+                "candidate_multiplier": CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
+                "final_output_k": self.top_k,
             }
+            if "ours_evoneed_planned" in self.methods:
+                expected["evoneed_profile"]["planned_initial_retrieval"] = {
+                    "mode": "planned_needs",
+                    "parallel_actions": True,
+                    "max_planned_actions": 3,
+                }
+            if "ours_evoneed_planned_shared" in self.methods:
+                expected["evoneed_profile"]["planned_shared_budget"] = {
+                    "mode": "planned_needs",
+                    "parallel_actions": True,
+                    "max_planned_actions": 3,
+                    "route_budget_mode": "shared_total",
+                    "total_candidate_budget": "top_k",
+                    "allocation": "planner_proposed_normalized_to_top_k",
+                }
+            if "ours_evoneed_equal" in self.methods:
+                expected["evoneed_profile"]["equal_budget"] = {
+                    "mode": "planned_needs",
+                    "parallel_actions": True,
+                    "max_planned_actions": 3,
+                    "route_budget_mode": "equal_total",
+                    "total_initial_budget": self.eval_settings.evoneed_retrieval_budget,
+                }
+            if "ours_evoneed_dynamic" in self.methods:
+                expected["evoneed_profile"]["dynamic_budget"] = {
+                    "mode": "planned_needs",
+                    "parallel_actions": True,
+                    "max_planned_actions": 3,
+                    "route_budget_mode": "planned_total",
+                    "total_initial_budget": self.eval_settings.evoneed_retrieval_budget,
+                    "minimum_active_route_budget": (
+                        self.eval_settings.evoneed_min_route_budget
+                    ),
+                    "allocation": "planner_proposed_normalized_to_total",
+                }
         if self.chunking_strategy != "fixed":
             expected["chunking_strategy"] = self.chunking_strategy
         if path.is_file():
@@ -1388,6 +1695,31 @@ def embedding_identity(settings: Settings) -> str:
     # Preserve the original local-evaluation fingerprint so completed local
     # naive/hybrid checkpoints remain resumable after adding API providers.
     return settings.embedding_model_id
+
+
+async def _retry_timeout(
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    attempts: int,
+    label: str,
+) -> Any:
+    """Retry a resumable document operation after transient worker timeouts."""
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return await operation()
+        except TimeoutError:
+            if attempt >= attempts:
+                raise
+            delay = min(2 ** (attempt - 1), 10)
+            logger.warning(
+                "%s timed out; retrying in %ss (%s/%s)",
+                label,
+                delay,
+                attempt,
+                attempts,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable timeout retry state")
 
 
 def light_entity_fingerprint(base_fingerprint: str, settings: Settings) -> str:

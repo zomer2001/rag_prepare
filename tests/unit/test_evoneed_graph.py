@@ -32,6 +32,19 @@ def test_need_id_accepts_numeric_model_output() -> None:
     assert need.need_id == "1"
 
 
+def test_satisfied_need_accepts_zero_remaining_budget() -> None:
+    need = NeedItem(
+        need_id="done",
+        knowledge_type="text_evidence",
+        status="satisfied",
+        query="completed evidence need",
+        route="vector",
+        budget=0,
+    )
+
+    assert need.budget == 0
+
+
 def test_need_relations_accept_structured_relation_paths() -> None:
     need = NeedItem.model_validate(
         {
@@ -65,7 +78,8 @@ def test_need_state_accepts_finding_strings_without_treating_them_as_cited() -> 
 
 
 class FakeEvoNeedModel:
-    async def plan_needs(self, _question):
+    async def plan_needs(self, _question, *, total_budget):
+        assert total_budget > 0
         return ModelCall(
             KnowledgeNeedState(
                 analytic_goal="Explain the relationship change with source support.",
@@ -75,12 +89,14 @@ class FakeEvoNeedModel:
                         knowledge_type="text_evidence",
                         query="Acme exact announcement",
                         route="vector",
+                        budget=7,
                     ),
                     NeedItem(
                         need_id="evolution",
                         knowledge_type="evolution_evidence",
                         query="Acme relationship change timeline",
                         route="event",
+                        budget=4,
                         missing_slots=["change_event", "state_after"],
                     ),
                 ],
@@ -184,16 +200,23 @@ class FakeEvoNeedModel:
 async def test_evoneed_retrieves_only_routes_for_open_typed_needs() -> None:
     calls: list[tuple[str, str, int]] = []
 
-    async def retrieve(need: NeedItem, top_k: int) -> list[RetrievedChunk]:
-        calls.append((need.need_id, need.route, top_k))
-        return [
-            RetrievedChunk(
-                chunk_id=f"chunk-{need.route}",
-                document_id=f"doc-{need.route}",
-                text=f"{need.route} evidence",
-                metadata={"channels": [need.route]},
+    async def retrieve(
+        needs: list[NeedItem], budgets: list[int]
+    ) -> list[list[RetrievedChunk]]:
+        batches = []
+        for need, budget in zip(needs, budgets, strict=True):
+            calls.append((need.need_id, need.route, budget))
+            batches.append(
+                [
+                    RetrievedChunk(
+                        chunk_id=f"chunk-{need.route}",
+                        document_id=f"doc-{need.route}",
+                        text=f"{need.route} evidence",
+                        metadata={"channels": [need.route]},
+                    )
+                ]
             )
-        ]
+        return batches
 
     run = await EvoNeedRAGGraph(retrieve, FakeEvoNeedModel()).run(
         "How did Acme's relationship change?",
@@ -218,6 +241,146 @@ async def test_evoneed_retrieves_only_routes_for_open_typed_needs() -> None:
         "doc-graph",
     }
     assert run.trace[-1]["final_need_state"]["sufficient"] is True
+
+
+@pytest.mark.asyncio
+async def test_planned_evoneed_uses_planner_actions_in_first_round() -> None:
+    calls: list[tuple[str, str, str, int]] = []
+
+    async def retrieve(
+        needs: list[NeedItem], budgets: list[int]
+    ) -> list[list[RetrievedChunk]]:
+        batches = []
+        for need, budget in zip(needs, budgets, strict=True):
+            calls.append((need.need_id, need.route, need.query, budget))
+            batches.append(
+                [
+                    RetrievedChunk(
+                        chunk_id=f"chunk-{need.route}",
+                        document_id=f"doc-{need.route}",
+                        text=f"{need.route} evidence",
+                        metadata={"channels": [need.route]},
+                    )
+                ]
+            )
+        return batches
+
+    run = await EvoNeedRAGGraph(
+        retrieve,
+        FakeEvoNeedModel(),
+        initial_retrieval="planned_needs",
+    ).run(
+        "How did Acme's relationship change?",
+        top_k=10,
+        context_k=10,
+        max_retrieval_rounds=1,
+        rrf_k=60,
+    )
+
+    assert calls == [
+        ("text", "vector", "Acme exact announcement", 10),
+        ("evolution", "event", "Acme relationship change timeline", 10),
+    ]
+    assert run.retrieval_rounds == 1
+    assert run.llm_calls == 3
+    retrieve_trace = next(
+        item for item in run.trace if item["node"] == "retrieve_needs"
+    )
+    assert retrieve_trace["initial_retrieval"] == "planned_needs"
+    assert {item.document_id for item in run.evidence} == {
+        "doc-vector",
+        "doc-event",
+    }
+
+
+@pytest.mark.asyncio
+async def test_planned_evoneed_can_share_one_budget_across_actions() -> None:
+    calls: list[tuple[str, int]] = []
+
+    async def retrieve(
+        needs: list[NeedItem], budgets: list[int]
+    ) -> list[list[RetrievedChunk]]:
+        batches = []
+        for need, budget in zip(needs, budgets, strict=True):
+            calls.append((need.route, budget))
+            batches.append(
+                [
+                    RetrievedChunk(
+                        chunk_id=f"chunk-{need.route}",
+                        document_id=f"doc-{need.route}",
+                        text=f"{need.route} evidence",
+                    )
+                ]
+            )
+        return batches
+
+    run = await EvoNeedRAGGraph(
+        retrieve,
+        FakeEvoNeedModel(),
+        initial_retrieval="planned_needs",
+        route_budget_mode="shared_total",
+    ).run(
+        "How did Acme's relationship change?",
+        top_k=11,
+        context_k=11,
+        max_retrieval_rounds=1,
+        rrf_k=60,
+    )
+
+    assert calls == [("vector", 7), ("event", 4)]
+    retrieve_trace = next(
+        item for item in run.trace if item["node"] == "retrieve_needs"
+    )
+    assert retrieve_trace["route_budget_mode"] == "shared_total"
+    assert retrieve_trace["total_candidate_budget"] == 11
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("equal_total", [30, 30]), ("planned_total", [37, 23])],
+)
+async def test_controlled_evoneed_uses_one_fixed_total_budget(mode, expected) -> None:
+    observed: list[int] = []
+
+    async def retrieve(
+        needs: list[NeedItem], budgets: list[int]
+    ) -> list[list[RetrievedChunk]]:
+        observed.extend(budgets)
+        return [
+            [
+                RetrievedChunk(
+                    chunk_id=f"chunk-{need.route}",
+                    document_id=f"doc-{need.route}",
+                    text=f"{need.route} evidence",
+                )
+            ]
+            for need in needs
+        ]
+
+    run = await EvoNeedRAGGraph(
+        retrieve,
+        FakeEvoNeedModel(),
+        initial_retrieval="planned_needs",
+        route_budget_mode=mode,
+        minimum_route_budget=5,
+    ).run(
+        "How did Acme's relationship change?",
+        top_k=20,
+        context_k=20,
+        retrieval_budget=60,
+        max_retrieval_rounds=1,
+        rrf_k=60,
+        retrieval_only=True,
+    )
+
+    assert observed == expected
+    assert sum(observed) == 60
+    assert run.llm_calls == 1
+    assert [item["node"] for item in run.trace] == [
+        "plan_needs",
+        "retrieve_needs",
+    ]
 
 
 def test_need_coverage_fusion_prefers_new_need_coverage() -> None:
@@ -322,6 +485,26 @@ def test_route_candidate_depth_is_not_split_across_actions() -> None:
     assert allocate_route_budgets(top_k=10, action_count=3) == [10, 10, 10]
 
 
+def test_route_candidate_depth_can_be_shared_across_actions() -> None:
+    assert allocate_route_budgets(
+        top_k=20,
+        action_count=3,
+        shared_total=True,
+        planned_budgets=[12, 5, 3],
+    ) == [12, 5, 3]
+
+
+def test_invalid_planner_budgets_are_normalized_to_total() -> None:
+    budgets = allocate_route_budgets(
+        top_k=20,
+        action_count=3,
+        shared_total=True,
+        planned_budgets=[100, 20, 10],
+    )
+    assert sum(budgets) == 20
+    assert budgets[0] > budgets[1] > budgets[2]
+
+
 def test_temporal_change_question_gets_evolution_guard() -> None:
     initial = KnowledgeNeedState(
         analytic_goal="Compare two reports.",
@@ -342,7 +525,7 @@ def test_temporal_change_question_gets_evolution_guard() -> None:
         initial=True,
     )
 
-    assert len(normalized.needs) == 3
+    assert len(normalized.needs) == 2
     assert normalized.needs[-1].knowledge_type == "evolution_evidence"
     assert normalized.needs[-1].route == "event"
     assert normalized.needs[-1].query.startswith("Did the portrayal change")
@@ -371,6 +554,52 @@ def test_repeated_open_query_restores_full_question_context() -> None:
         "TechCrunch report. Full question context: "
         "What changed between the two TechCrunch reports?"
     )
+
+
+def test_blank_assessment_query_reuses_previous_query() -> None:
+    previous = KnowledgeNeedState(
+        analytic_goal="goal",
+        needs=[
+            NeedItem(
+                need_id="source",
+                knowledge_type="text_evidence",
+                query="TechCrunch report",
+                route="vector",
+            )
+        ],
+    )
+    assessed = KnowledgeNeedState(
+        analytic_goal="goal",
+        needs=[
+            NeedItem(
+                need_id="source",
+                knowledge_type="text_evidence",
+                status="partial",
+                query="",
+                route="vector",
+            )
+        ],
+    )
+
+    normalized = normalize_need_state(
+        assessed,
+        question="What changed between the two TechCrunch reports?",
+        previous_state=previous,
+    )
+
+    assert normalized.needs[0].query.startswith("TechCrunch report")
+
+
+def test_need_item_accepts_slot_detail_mapping() -> None:
+    need = NeedItem(
+        need_id="evolution",
+        knowledge_type="evolution_evidence",
+        query="What changed?",
+        route="event",
+        missing_slots={"state_before": "old state", "change_event": "event"},
+    )
+
+    assert need.missing_slots == ["state_before", "change_event"]
 
 
 def test_supported_evidence_is_promoted_without_reordering_unsupported_items() -> None:

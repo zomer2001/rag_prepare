@@ -30,9 +30,18 @@ def export_dataset(
 ) -> dict[str, int | str]:
     source_corpus = load_jsonl(dataset_dir / "corpus.jsonl")
     source_queries = load_jsonl(dataset_dir / "queries.jsonl")
+    bundle = load_bundle(dataset_dir, name=name)
+    benchmark_queries = list(bundle.queries)
 
     if query_limit is not None:
         source_queries = source_queries[:query_limit]
+        benchmark_queries = benchmark_queries[:query_limit]
+
+    if len(source_queries) != len(benchmark_queries):
+        raise ValueError(
+            "Raw and normalized query counts differ: "
+            f"{len(source_queries)} != {len(benchmark_queries)}"
+        )
 
     corpus_by_url_index = {
         str(source["url"]): index
@@ -69,7 +78,6 @@ def export_dataset(
     corpus: list[dict[str, Any]] = []
     corpus_by_url: dict[str, dict[str, Any]] = {}
     corpus_by_title: dict[str, dict[str, Any]] = {}
-    bundle = load_bundle(dataset_dir, name=name)
     documents_by_title = {document.title: document for document in bundle.documents}
     selected_documents = []
     for source in source_corpus:
@@ -123,7 +131,11 @@ def export_dataset(
 
     missing_evidence = 0
     samples: list[dict[str, Any]] = []
-    for index, source in enumerate(source_queries):
+    for source, benchmark_query in zip(
+        source_queries,
+        benchmark_queries,
+        strict=True,
+    ):
         paragraphs = []
         for evidence in source.get("evidence_list", []):
             document = corpus_by_url.get(evidence.get("url", ""))
@@ -136,12 +148,12 @@ def export_dataset(
 
         samples.append(
             {
-                "id": source.get("query_id") or f"{name}-{index:05d}",
-                "question": source.get("query") or source.get("question") or "",
-                "answer": source.get("answer", ""),
-                "answerable": bool(source.get("answer")),
+                "id": benchmark_query.query_id,
+                "question": benchmark_query.question,
+                "answer": benchmark_query.answer or "",
+                "answerable": bool(benchmark_query.answer),
                 "paragraphs": paragraphs,
-                "question_type": source.get("question_type"),
+                "question_type": benchmark_query.question_type,
             }
         )
 

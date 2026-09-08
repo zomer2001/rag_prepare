@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import logging
+from pathlib import Path
 from typing import Any, Protocol
 
 from openai import AsyncOpenAI
@@ -17,12 +21,16 @@ from rag_graph_demo.agentic.prompts import (
     EVIDENCE_ASSESSMENT_SYSTEM,
     EVONEED_ASSESS_SYSTEM,
     EVONEED_PLAN_SYSTEM,
+    EVONEED_PROMPT_PROFILE_VERSION,
     GROUNDED_ANSWER_SYSTEM,
     QUERY_REWRITE_SYSTEM,
     evidence_context,
 )
 from rag_graph_demo.config import Settings
 from rag_graph_demo.evaluation.models import RetrievedChunk
+from rag_graph_demo.storage.atomic_json import read_json, write_json_atomic
+
+logger = logging.getLogger(__name__)
 
 
 class AgentModel(Protocol):
@@ -53,10 +61,18 @@ class AgentModel(Protocol):
 class DeepSeekAgentModel:
     """Typed DeepSeek facade used only by the LangGraph controller."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        plan_cache_path: Path | None = None,
+    ) -> None:
         if not settings.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY is required for agentic retrieval")
         self.settings = settings
+        self.plan_cache_path = plan_cache_path
+        raw_cache = read_json(plan_cache_path, default={}) if plan_cache_path else {}
+        self._plan_cache = raw_cache if isinstance(raw_cache, dict) else {}
         self.client = AsyncOpenAI(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
@@ -82,14 +98,34 @@ class DeepSeekAgentModel:
             model=self.settings.deepseek_extraction_model,
         )
 
-    async def plan_needs(self, question: str) -> ModelCall[KnowledgeNeedState]:
-        user = f"Question: {question}\n\nReturn JSON only."
-        return await self._json_call(
+    async def plan_needs(
+        self,
+        question: str,
+        *,
+        total_budget: int,
+    ) -> ModelCall[KnowledgeNeedState]:
+        cache_key = hashlib.sha256(
+            (
+                f"{EVONEED_PROMPT_PROFILE_VERSION}\x1f{total_budget}\x1f{question}"
+            ).encode()
+        ).hexdigest()
+        cached = self._plan_cache.get(cache_key)
+        if isinstance(cached, dict):
+            return ModelCall(value=KnowledgeNeedState.model_validate(cached))
+        user = (
+            f"Question: {question}\nTotal retrieval candidate budget: {total_budget}\n\n"
+            "Allocate that total budget across the proposed needs. Return JSON only."
+        )
+        call = await self._json_call(
             KnowledgeNeedState,
             EVONEED_PLAN_SYSTEM,
             user,
             model=self.settings.deepseek_extraction_model,
         )
+        self._plan_cache[cache_key] = call.value.model_dump(mode="json")
+        if self.plan_cache_path is not None:
+            write_json_atomic(self.plan_cache_path, self._plan_cache)
+        return call
 
     async def assess_needs(
         self,
@@ -176,15 +212,47 @@ class DeepSeekAgentModel:
         }
         if not self.settings.deepseek_thinking_enabled:
             request["temperature"] = 0
-        response = await self.client.chat.completions.create(**request)
-        content = response.choices[0].message.content or ""
-        value = schema.model_validate(extract_json_object(content))
-        usage = response.usage
-        return ModelCall(
-            value=value,
-            input_tokens=int(usage.prompt_tokens) if usage else 0,
-            output_tokens=int(usage.completion_tokens) if usage else 0,
-        )
+        attempts = max(1, self.settings.llm_max_retries)
+        for attempt in range(1, attempts + 1):
+            response = await self.client.chat.completions.create(**request)
+            content = response.choices[0].message.content or ""
+            try:
+                value = schema.model_validate(extract_json_object(content))
+            except (json.JSONDecodeError, ValueError) as exc:
+                if attempt >= attempts:
+                    raise
+                finish_reason = response.choices[0].finish_reason or "unknown"
+                delay = min(2 ** (attempt - 1), 4)
+                logger.warning(
+                    "Invalid DeepSeek JSON (%s, finish_reason=%s); retrying in %ss "
+                    "(%s/%s)",
+                    type(exc).__name__,
+                    finish_reason,
+                    delay,
+                    attempt,
+                    attempts,
+                )
+                request["messages"] = [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{user}\n\nA previous response was invalid or truncated. "
+                            "Regenerate a complete, concise JSON object and verify that all "
+                            "strings, arrays, and braces are closed."
+                        ),
+                    },
+                ]
+                await asyncio.sleep(delay)
+                continue
+            usage = response.usage
+            return ModelCall(
+                value=value,
+                input_tokens=int(usage.prompt_tokens) if usage else 0,
+                output_tokens=int(usage.completion_tokens) if usage else 0,
+            )
+
+        raise RuntimeError("unreachable DeepSeek JSON retry state")
 
 
 def extract_json_object(value: str) -> dict[str, Any]:

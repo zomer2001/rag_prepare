@@ -96,9 +96,7 @@ async def test_event_query_filters_time_and_builds_timeline_relations(tmp_path) 
     assert result.inferred_end_time == "2025-12-31"
     assert len(result.relations) == 1
     assert result.relations[0].relation_type == "precedes"
-    context, _ = await service.build_query_context(
-        "2024 到 2025 年 Lattice 有哪些变化？"
-    )
+    context, _ = await service.build_query_context("2024 到 2025 年 Lattice 有哪些变化？")
     assert "事件链（只表达时间或共享实体，不自动表示因果）" in context
     assert "--先于(" in context
     assert "Lattice)-->" in context
@@ -178,15 +176,11 @@ async def test_event_search_keeps_relevance_rank_and_timeline_can_sort_by_time(
     question = "Lattice 雷达升级测试结果"
 
     ranked = await service.search(EventQueryRequest(question=question))
-    timeline = await service.search(
-        EventQueryRequest(question=question, sort_by="time")
-    )
+    timeline = await service.search(EventQueryRequest(question=question, sort_by="time"))
     context, _ = await service.build_query_context(question)
 
     assert [item.start_time for item in ranked.events] == ["2025", "2024"]
-    assert [item.event_id for item in ranked.rankings] == [
-        item.event_id for item in ranked.events
-    ]
+    assert [item.event_id for item in ranked.rankings] == [item.event_id for item in ranked.events]
     assert ranked.rankings[0].score > ranked.rankings[1].score
     assert ranked.rankings[0].action_score >= ranked.rankings[1].action_score
     assert [item.start_time for item in timeline.events] == ["2024", "2025"]
@@ -207,9 +201,7 @@ async def test_latest_event_intent_exposes_recency_as_a_ranking_signal(tmp_path)
             [candidate(summary="Anduril 更新 Lattice 状态。", start_time=year)],
         )
 
-    result = await service.search(
-        EventQueryRequest(question="目前 Lattice 最新状态是什么？")
-    )
+    result = await service.search(EventQueryRequest(question="目前 Lattice 最新状态是什么？"))
 
     assert [item.start_time for item in result.events] == ["2025", "2024"]
     assert [item.temporal_score for item in result.rankings] == [1.0, 0.0]
@@ -257,9 +249,7 @@ async def test_event_vector_seed_can_expand_one_timeline_hop(tmp_path) -> None:
 
     assert {item.start_time for item in result.events} == {"2024", "2025"}
     expanded = {item.event_id for item in result.rankings if item.expanded}
-    assert expanded == {
-        next(item.event_id for item in events if item.start_time == "2024")
-    }
+    assert expanded == {next(item.event_id for item in events if item.start_time == "2024")}
 
 
 @pytest.mark.asyncio
@@ -287,9 +277,7 @@ async def test_question_entity_excludes_unrelated_events_in_same_year(tmp_path) 
         ],
     )
 
-    result = await service.search(
-        EventQueryRequest(question="2025 年 Anduril 有哪些关键合同？")
-    )
+    result = await service.search(EventQueryRequest(question="2025 年 Anduril 有哪些关键合同？"))
 
     assert [item.summary for item in result.events] == ["Anduril 获得合同。"]
 
@@ -391,6 +379,108 @@ async def test_llm_event_extractor_downgrades_unsupported_time_precision() -> No
 
     assert len(events) == 1
     assert events[0].time_precision.value == "unknown"
+
+
+class RepairableJsonEngine:
+    async def complete_extraction(self, prompt: str, system_prompt: str) -> str:
+        del prompt, system_prompt
+        return """{"events": [{
+          "event_type": "发布",
+          "summary": "公司发布产品。",
+          "actors": ["公司"],
+          "objects": ["产品"]
+          "evidence": "公司发布产品。"
+        }]}"""
+
+
+@pytest.mark.asyncio
+async def test_llm_event_extractor_repairs_invalid_json_syntax() -> None:
+    extractor = LLMEventExtractor(RepairableJsonEngine())
+
+    events = await extractor.extract("测试", "公司发布产品。")
+
+    assert len(events) == 1
+    assert events[0].summary == "公司发布产品。"
+
+
+class NullableFactEffectEngine:
+    async def complete_extraction(self, prompt: str, system_prompt: str) -> str:
+        del prompt, system_prompt
+        return """{"events": [{
+          "event_type": "发布",
+          "summary": "公司发布产品。",
+          "actors": ["公司"],
+          "objects": ["产品"],
+          "evidence": "公司发布产品。",
+          "fact_effects": [{
+            "subject": "公司",
+            "predicate": "发布",
+            "object": null,
+            "effect_type": "creates"
+          }]
+        }]}"""
+
+
+@pytest.mark.asyncio
+async def test_llm_event_extractor_drops_invalid_effect_not_event() -> None:
+    extractor = LLMEventExtractor(NullableFactEffectEngine())
+
+    events = await extractor.extract("测试", "公司发布产品。")
+
+    assert len(events) == 1
+    assert events[0].fact_effects == []
+
+
+class RetryMalformedResponseEngine:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete_extraction(self, prompt: str, system_prompt: str) -> str:
+        del prompt, system_prompt
+        self.calls += 1
+        if self.calls == 1:
+            return "not JSON at all"
+        return """{"events": [{
+          "event_type": "发布",
+          "summary": "公司发布产品。",
+          "actors": ["公司"],
+          "objects": ["产品"],
+          "evidence": "公司发布产品。"
+        }]}"""
+
+
+@pytest.mark.asyncio
+async def test_llm_event_extractor_retries_unrepairable_response() -> None:
+    engine = RetryMalformedResponseEngine()
+    extractor = LLMEventExtractor(engine)
+
+    events = await extractor.extract("测试", "公司发布产品。")
+
+    assert len(events) == 1
+    assert engine.calls == 2
+
+
+class MinutePrecisionEngine:
+    async def complete_extraction(self, prompt: str, system_prompt: str) -> str:
+        del prompt, system_prompt
+        return """{"events": [{
+          "event_type": "发布",
+          "summary": "公司发布产品。",
+          "actors": ["公司"],
+          "objects": ["产品"],
+          "start_time": "2026-09-03T16:47",
+          "time_precision": "minute",
+          "evidence": "公司发布产品。"
+        }]}"""
+
+
+@pytest.mark.asyncio
+async def test_llm_event_extractor_maps_minute_precision_to_day() -> None:
+    extractor = LLMEventExtractor(MinutePrecisionEngine())
+
+    events = await extractor.extract("测试", "公司发布产品。")
+
+    assert events[0].time_precision.value == "day"
 
 
 class ManyEventsEngine:

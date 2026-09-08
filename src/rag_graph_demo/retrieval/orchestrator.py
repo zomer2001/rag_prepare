@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -43,6 +43,28 @@ def default_document_id_resolver(content: str, file_path: str) -> str | None:
     return name.split("__", 1)[0] if "__" in name else None
 
 
+def merge_query_plans(plans: Sequence[QueryPlan]) -> QueryPlan:
+    """Combine route-specific plans without asking an LLM to plan again."""
+
+    def merged(field: str, limit: int = 12) -> list[str]:
+        values = [value for plan in plans for value in getattr(plan, field)]
+        return list(dict.fromkeys(value for value in values if value))[:limit]
+
+    starts = [plan.start_time for plan in plans if plan.start_time]
+    ends = [plan.end_time for plan in plans if plan.end_time]
+    return QueryPlan(
+        low_level_keywords=merged("low_level_keywords"),
+        high_level_keywords=merged("high_level_keywords"),
+        relations=merged("relations"),
+        entities=merged("entities", 6),
+        event_types=merged("event_types", 6),
+        start_time=min(starts) if starts else None,
+        end_time=max(ends) if ends else None,
+        state_intents=merged("state_intents", 6),
+        expand_event_chain=any(plan.expand_event_chain for plan in plans),
+    )
+
+
 class UnifiedRetrievalOrchestrator:
     """Run vector, semantic graph, and event retrieval with one query plan."""
 
@@ -59,15 +81,27 @@ class UnifiedRetrievalOrchestrator:
         strict_event_failures: bool = False,
         strict_coordination_failures: bool = False,
         max_sources_per_event: int = 2,
+        evolink_seed_limit_per_name: int = 3,
+        evolink_max_entity_names: int = 8,
+        evolink_max_event_seeds: int = 5,
+        evolink_expansion_limit: int = 20,
+        evolink_link_weight: float = 0.1,
     ) -> None:
+        if evolink_expansion_limit < 1:
+            raise ValueError("evolink_expansion_limit must be positive")
+        if not 0 <= evolink_link_weight <= 1:
+            raise ValueError("evolink_link_weight must be between 0 and 1")
         self._engine = engine
         self._planner = planner
         self._event_service = event_service
         self._event_vector_index = event_vector_index
         self._tkg_registry = tkg_registry
-        self._evolink = (
-            EvoLinkCoordinator(coordination_store) if coordination_store else None
-        )
+        self._evolink_seed_limit_per_name = evolink_seed_limit_per_name
+        self._evolink_max_entity_names = evolink_max_entity_names
+        self._evolink_max_event_seeds = evolink_max_event_seeds
+        self._evolink_expansion_limit = evolink_expansion_limit
+        self._evolink_link_weight = evolink_link_weight
+        self._evolink = self._build_evolink(coordination_store)
         self._document_id_resolver = document_id_resolver
         self._strict_event_failures = strict_event_failures
         self._strict_coordination_failures = strict_coordination_failures
@@ -75,7 +109,20 @@ class UnifiedRetrievalOrchestrator:
 
     def bind_coordination_store(self, store: CoordinationGraphStore) -> None:
         """Attach the Neo4j coordination graph after an evaluation index is built."""
-        self._evolink = EvoLinkCoordinator(store)
+        self._evolink = self._build_evolink(store)
+
+    def _build_evolink(
+        self,
+        store: CoordinationGraphStore | None,
+    ) -> EvoLinkCoordinator | None:
+        if store is None:
+            return None
+        return EvoLinkCoordinator(
+            store,
+            seed_limit_per_name=self._evolink_seed_limit_per_name,
+            max_entity_names=self._evolink_max_entity_names,
+            max_event_seeds=self._evolink_max_event_seeds,
+        )
 
     async def retrieve(
         self,
@@ -84,11 +131,12 @@ class UnifiedRetrievalOrchestrator:
         top_k: int,
         include_events: bool,
         link_evidence: bool = False,
-        candidate_multiplier: int = 3,
+        candidate_multiplier: int = 1,
         channels: set[RetrievalChannel] | None = None,
+        plan_override: QueryPlan | None = None,
     ) -> UnifiedRetrievalResult:
         started = perf_counter()
-        plan = await self._planner.plan(question)
+        plan = plan_override or await self._planner.plan(question)
         candidate_limit = max(top_k, top_k * candidate_multiplier)
         requested_channels = set(channels or {"vector", "graph"})
         if channels is None and include_events:
@@ -159,7 +207,11 @@ class UnifiedRetrievalOrchestrator:
             channel_candidates["graph"] = graph_candidates
         if "event" in requested_channels or evolink_result.event_candidates:
             channel_candidates["event"] = event_candidates
-        bundles = fuse_evidence(channel_candidates, top_k=top_k)
+        bundles = fuse_evidence(
+            channel_candidates,
+            top_k=top_k,
+            linked_candidate_weight=self._evolink_link_weight,
+        )
         return UnifiedRetrievalResult(
             plan=plan,
             bundles=tuple(bundles),
@@ -180,10 +232,49 @@ class UnifiedRetrievalOrchestrator:
                 "evolink_enabled": link_evidence,
                 "evolink_error": evolink_error,
                 "evolink": evolink_result.metadata,
+                "evolink_link_weight": self._evolink_link_weight,
+                "evolink_expansion_limit": self._evolink_expansion_limit,
                 "tkg_assertion_candidates": len(tkg_candidates),
                 "elapsed_ms": int((perf_counter() - started) * 1_000),
             },
         )
+
+    async def coordinate_planned_results(
+        self,
+        plans: Sequence[QueryPlan],
+        results: Sequence[UnifiedRetrievalResult],
+        *,
+        limit: int,
+    ) -> tuple[EvoLinkResult, str | None]:
+        """Run one shared EvoLink expansion after all planned routes finish."""
+        if not plans:
+            return EvoLinkResult(), None
+        plan = merge_query_plans(plans)
+        entity_names = list(plan.entities)
+        event_candidates: list[EvidenceCandidate] = []
+        for result in results:
+            entity_names.extend(self._graph_entity_names(result.graph_data))
+            event_candidates.extend(result.candidates.get("event", ()))
+        if self._evolink is None:
+            error = "Neo4j coordination graph is not configured"
+            if self._strict_coordination_failures:
+                raise RuntimeError(error)
+            return EvoLinkResult(), error
+        try:
+            return (
+                await self._evolink.coordinate(
+                    plan,
+                    entity_names=entity_names,
+                    event_candidates=event_candidates,
+                    limit=min(limit, self._evolink_expansion_limit),
+                ),
+                None,
+            )
+        except Exception as exc:
+            if self._strict_coordination_failures:
+                raise
+            logger.exception("Shared EvoLink coordination unavailable")
+            return EvoLinkResult(), f"{type(exc).__name__}: {exc}"
 
     async def _coordinate_safely(
         self,
@@ -207,7 +298,7 @@ class UnifiedRetrievalOrchestrator:
                     plan,
                     entity_names=self._graph_entity_names(graph_raw),
                     event_candidates=event_candidates,
-                    limit=candidate_limit,
+                    limit=min(candidate_limit, self._evolink_expansion_limit),
                 ),
                 None,
             )

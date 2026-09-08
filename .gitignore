@@ -26,8 +26,15 @@ data/benchmarks/*
 data/tkg/*
 data/eventrag/*
 data/e2rag/*
+data/hipporag/*
+data/graphrag/*
+data/raptor/*
 data/demo_data_runtime/*
 !data/**/.gitkeep
+
+reports/**/logs/
+reports/**/previous_query_results_*/
+reports/**/incompatible_evoneed_results_*/
 
 qdrant_storage/
 neo4j_storage/

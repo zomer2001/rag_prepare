@@ -13,12 +13,32 @@ import os
 import re
 import shlex
 import subprocess
+import sys
+import types
+import uuid
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 
 import numpy as np
 from openai import AsyncOpenAI
+from tqdm.auto import tqdm
+
+
+@contextmanager
+def upstream_output(path: Path, *, visible: bool):
+    """Keep noisy upstream progress available on disk without flooding the terminal."""
+    if visible:
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        path.open("a", encoding="utf-8") as handle,
+        redirect_stdout(handle),
+        redirect_stderr(handle),
+    ):
+        yield
 
 
 def load_dotenv(path: Path) -> None:
@@ -67,14 +87,41 @@ def upstream_revision(root: Path) -> str:
         return "unknown"
 
 
-def write_or_validate_manifest(path: Path, expected: dict[str, Any]) -> None:
+QUERY_MANIFEST_KEYS = frozenset(
+    {"queries_sha256", "query_override_sha256", "queries"}
+)
+
+
+def write_or_validate_manifest(
+    path: Path,
+    expected: dict[str, Any],
+    *,
+    allow_query_set_change: bool = False,
+) -> None:
     if path.is_file():
         existing = json.loads(path.read_text(encoding="utf-8"))
-        if existing != expected:
-            raise RuntimeError(f"Runtime manifest differs: {path}. Use a new --runtime-dir.")
-        return
+        if existing == expected:
+            return
+        if allow_query_set_change:
+            existing_index = {
+                key: value
+                for key, value in existing.items()
+                if key not in QUERY_MANIFEST_KEYS
+            }
+            expected_index = {
+                key: value
+                for key, value in expected.items()
+                if key not in QUERY_MANIFEST_KEYS
+            }
+            if existing_index == expected_index:
+                return
+        raise RuntimeError(f"Runtime manifest differs: {path}. Use a new --runtime-dir.")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(expected, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def retrieval_manifest_path(output_path: Path) -> Path:
+    return output_path.with_suffix(output_path.suffix + ".manifest.json")
 
 
 def append_jsonl(path: Path, value: dict[str, Any]) -> None:
@@ -82,6 +129,91 @@ def append_jsonl(path: Path, value: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(value, ensure_ascii=False, default=str) + "\n")
         handle.flush()
+
+
+def load_response_cache(path: Path) -> dict[str, str]:
+    """Load complete cached LLM responses and ignore a torn final record."""
+    if not path.is_file():
+        return {}
+    cache: dict[str, str] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                key = record["key"]
+                content = record["content"]
+                if not isinstance(key, str) or not isinstance(content, str):
+                    raise TypeError("cache key and content must be strings")
+            except (json.JSONDecodeError, KeyError, TypeError):
+                print(
+                    f"Ignoring incomplete E2RAG response-cache record "
+                    f"at {path}:{line_number}",
+                    file=sys.stderr,
+                )
+                continue
+            cache[key] = content
+    return cache
+
+
+def append_response_cache(path: Path, *, key: str, content: str) -> None:
+    """Persist one complete model response before indexing continues."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"key": key, "content": content}, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def install_atomic_graphml_writer(storage_class: type[Any]) -> None:
+    """Keep the last valid graph when a process is interrupted during GraphML save."""
+    if getattr(storage_class, "_e2rag_atomic_writer_installed", False):
+        return
+    original_writer = storage_class.write_nx_graph
+
+    def atomic_writer(graph: Any, file_name: str | os.PathLike[str]) -> None:
+        target = Path(file_name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            original_writer(graph, str(temporary))
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    storage_class.write_nx_graph = staticmethod(atomic_writer)
+    storage_class._e2rag_atomic_writer_installed = True
+
+
+async def finish_index_batch_on_cancel(awaitable: Any) -> bool:
+    """Finish one storage commit after Ctrl-C; return whether cancellation occurred."""
+    task = asyncio.create_task(awaitable)
+    try:
+        await asyncio.shield(task)
+        return False
+    except asyncio.CancelledError:
+        # E2RAG saves several files concurrently. Let that commit finish so graph,
+        # vectors, KV stores, and the adapter checkpoint cannot diverge.
+        print(
+            "\nE2RAG received Ctrl-C; safely finishing the current batch...",
+            file=sys.__stderr__,
+        )
+        await task
+        return True
+
+
+def ensure_graphml_is_restartable(path: Path) -> None:
+    """Give a useful error for the common header-only file left by old versions."""
+    if path.is_file() and path.stat().st_size < 100:
+        raise RuntimeError(
+            f"E2RAG graph file is incomplete: {path}. The previous process was "
+            "interrupted while the old non-atomic writer was replacing it. Exact "
+            "graph attributes cannot be recovered from the remaining vector/KV "
+            "files; archive this entity_kg directory and rebuild the entity index."
+        )
 
 
 def completed_query_ids(path: Path) -> set[str]:
@@ -151,6 +283,7 @@ class ModelClients:
         dimensions: int,
         llm_concurrency: int,
         embedding_concurrency: int,
+        response_cache_path: Path,
     ) -> None:
         self.deepseek_model = deepseek_model
         self.zhipu_model = zhipu_model
@@ -163,6 +296,28 @@ class ModelClients:
         )
         self.llm_limit = asyncio.Semaphore(llm_concurrency)
         self.embedding_limit = asyncio.Semaphore(embedding_concurrency)
+        self._response_cache_path = response_cache_path
+        self._response_cache = load_response_cache(response_cache_path)
+        self._response_cache_lock = asyncio.Lock()
+
+    @staticmethod
+    def _response_cache_key(request: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            {"version": 1, "request": request},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def _store_response(self, key: str, content: str) -> str:
+        async with self._response_cache_lock:
+            existing = self._response_cache.get(key)
+            if existing is not None:
+                return existing
+            append_response_cache(self._response_cache_path, key=key, content=content)
+            self._response_cache[key] = content
+            return content
 
     async def complete(
         self,
@@ -187,9 +342,14 @@ class ModelClients:
         for key in ("max_tokens", "temperature", "top_p"):
             if kwargs.get(key) is not None:
                 request[key] = kwargs[key]
+        cache_key = self._response_cache_key(request)
+        cached = self._response_cache.get(cache_key)
+        if cached is not None:
+            return cached
         async with self.llm_limit:
             response = await self.deepseek.chat.completions.create(**request)
-        return response.choices[0].message.content or ""
+        content = response.choices[0].message.content or ""
+        return await self._store_response(cache_key, content)
 
     async def embed(self, texts: list[str]) -> np.ndarray:
         if not texts:
@@ -248,6 +408,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--llm-concurrency", type=int, default=4)
     parser.add_argument("--embedding-concurrency", type=int, default=2)
     parser.add_argument("--chunk-token-size", type=int, default=32768)
+    parser.add_argument(
+        "--allow-query-set-change",
+        action="store_true",
+        help=(
+            "For --stage retrieve only, reuse an index whose manifest differs only "
+            "in query hash/count. Corpus and every index-affecting setting must match."
+        ),
+    )
+    parser.add_argument(
+        "--show-upstream-output",
+        action="store_true",
+        help="Show verbose E2RAG output instead of saving it under the runtime directory",
+    )
     parser.add_argument(
         "--e2rag-root",
         type=Path,
@@ -342,6 +515,8 @@ def retrieved_rows(
 
 async def run(args: argparse.Namespace) -> int:
     load_dotenv(args.env_file.resolve())
+    if args.allow_query_set_change and args.stage != "retrieve":
+        raise ValueError("--allow-query-set-change is only valid with --stage retrieve")
     if min(
         args.top_k,
         args.index_batch_size,
@@ -367,6 +542,7 @@ async def run(args: argparse.Namespace) -> int:
     runtime_dir = args.runtime_dir.resolve()
     output_path = args.output.resolve()
     e2rag_root = args.e2rag_root.resolve()
+    upstream_log_path = runtime_dir / "e2rag_upstream.log"
     corpus = load_json_array(corpus_path)
     if args.corpus_limit is not None:
         corpus = corpus[: args.corpus_limit]
@@ -378,9 +554,19 @@ async def run(args: argparse.Namespace) -> int:
     if not corpus or not queries:
         raise ValueError("Corpus and queries must both be non-empty")
 
+    sys.path.insert(0, str(e2rag_root))
+    # E2RAG imports its optional Oracle backend eagerly. This benchmark uses
+    # NetworkXStorage, so avoid loading the native Oracle client at startup.
+    oracle_stub = types.ModuleType("oracledb")
+    oracle_stub.defaults = types.SimpleNamespace(fetch_lobs=True)
+    oracle_stub.DB_TYPE_VECTOR = object()
+    sys.modules["oracledb"] = oracle_stub
     from entity_event_rag import EntityEventRAG
     from entity_event_rag.base import QueryParam
+    from entity_event_rag.storage import NetworkXStorage
     from entity_event_rag.utils import EmbeddingFunc
+
+    install_atomic_graphml_writer(NetworkXStorage)
 
     api = {
         "EntityEventRAG": EntityEventRAG,
@@ -412,10 +598,48 @@ async def run(args: argparse.Namespace) -> int:
         "embedding_dimensions": dimensions,
         "source_modified": False,
     }
-    write_or_validate_manifest(runtime_dir / "adapter_manifest.json", manifest)
+    runtime_manifest_path = runtime_dir / "adapter_manifest.json"
+    write_or_validate_manifest(
+        runtime_manifest_path,
+        manifest,
+        allow_query_set_change=args.allow_query_set_change,
+    )
     if args.stage == "doctor":
         print(json.dumps({**manifest, "deepseek_key": "set", "zhipu_key": "set"}, indent=2))
         return 0
+
+    if args.stage == "retrieve":
+        run_manifest_path = retrieval_manifest_path(output_path)
+        if (
+            args.allow_query_set_change
+            and output_path.is_file()
+            and output_path.stat().st_size
+            and not run_manifest_path.is_file()
+        ):
+            raise RuntimeError(
+                f"Existing retrieval output has no run manifest: {output_path}. "
+                "Use a new --output path instead of mixing query sets."
+            )
+        write_or_validate_manifest(
+            run_manifest_path,
+            {
+                "method": manifest["method"],
+                "runtime_manifest_sha256": file_digest(runtime_manifest_path),
+                "corpus_sha256": manifest["corpus_sha256"],
+                "corpus_chunks": manifest["corpus_chunks"],
+                "queries_sha256": manifest["queries_sha256"],
+                "query_override_sha256": manifest["query_override_sha256"],
+                "queries": manifest["queries"],
+                "variant": manifest["variant"],
+                "top_k": manifest["top_k"],
+                "event_hop_depth": manifest["event_hop_depth"],
+            },
+        )
+
+    entity_dir = runtime_dir / "entity_kg"
+    event_dir = runtime_dir / "event_kg"
+    ensure_graphml_is_restartable(entity_dir / "graph_chunk_entity_relation.graphml")
+    ensure_graphml_is_restartable(event_dir / "graph_chunk_entity_relation.graphml")
 
     clients = ModelClients(
         deepseek_key=deepseek_key,
@@ -427,6 +651,7 @@ async def run(args: argparse.Namespace) -> int:
         dimensions=dimensions,
         llm_concurrency=args.llm_concurrency,
         embedding_concurrency=args.embedding_concurrency,
+        response_cache_path=runtime_dir / "adapter_llm_response_cache.jsonl",
     )
 
     async def complete(*model_args: Any, **model_kwargs: Any) -> str:
@@ -452,8 +677,6 @@ async def run(args: argparse.Namespace) -> int:
         "embedding_func_max_async": args.embedding_concurrency,
         "entity_extract_max_gleaning": 1,
     }
-    entity_dir = runtime_dir / "entity_kg"
-    event_dir = runtime_dir / "event_kg"
     entity_rag = api["EntityEventRAG"](
         working_dir=str(entity_dir), extraction_type="entity", **common
     )
@@ -476,23 +699,51 @@ async def run(args: argparse.Namespace) -> int:
                     completed_count = int(progress.get("completed_count") or 0)
                     elapsed_before = float(progress.get("elapsed_seconds") or 0)
                 started = perf_counter()
-                for start in range(completed_count, len(texts), args.index_batch_size):
-                    stop = min(start + args.index_batch_size, len(texts))
-                    await rag.ainsert(texts[start:stop])
-                    progress_path.write_text(
-                        json.dumps(
-                            {
-                                "completed_count": stop,
-                                "total_count": len(texts),
-                                "elapsed_seconds": elapsed_before + perf_counter() - started,
-                            },
-                            ensure_ascii=False,
-                            indent=2,
+                progress_bar = tqdm(
+                    total=len(texts),
+                    initial=completed_count,
+                    desc=f"e2rag:{label}-index",
+                    unit="chunk",
+                    dynamic_ncols=True,
+                )
+                try:
+                    for start in range(
+                        completed_count,
+                        len(texts),
+                        args.index_batch_size,
+                    ):
+                        stop = min(start + args.index_batch_size, len(texts))
+                        with upstream_output(
+                            upstream_log_path,
+                            visible=args.show_upstream_output,
+                        ):
+                            interrupted = await finish_index_batch_on_cancel(
+                                rag.ainsert(texts[start:stop])
+                            )
+                        progress_path.write_text(
+                            json.dumps(
+                                {
+                                    "completed_count": stop,
+                                    "total_count": len(texts),
+                                    "elapsed_seconds": (
+                                        elapsed_before + perf_counter() - started
+                                    ),
+                                },
+                                ensure_ascii=False,
+                                indent=2,
+                            )
+                            + "\n",
+                            encoding="utf-8",
                         )
-                        + "\n",
-                        encoding="utf-8",
-                    )
-                    print(f"E2RAG {label} index progress: {stop}/{len(texts)}")
+                        progress_bar.update(stop - start)
+                        if interrupted:
+                            tqdm.write(
+                                "E2RAG received Ctrl-C; the current batch was saved "
+                                "safely and can be resumed from this checkpoint."
+                            )
+                            raise asyncio.CancelledError
+                finally:
+                    progress_bar.close()
                 marker.write_text(
                     json.dumps(
                         {
@@ -523,30 +774,47 @@ async def run(args: argparse.Namespace) -> int:
         )
         lookup = CorpusLookup(corpus)
         completed = completed_query_ids(output_path)
-        for query in queries:
-            query_id = str(query.get("id") or query.get("query_id"))
-            if query_id in completed:
-                print(f"Skipping completed query: {query_id}")
-                continue
-            question = str(query.get("question") or query.get("query") or "")
-            started = perf_counter()
-            response = await combined_rag.aquery(question, query_param(api, args))
-            elapsed_ms = (perf_counter() - started) * 1000
-            retrieved, stats = retrieved_rows(response, lookup, top_k=args.top_k)
-            append_jsonl(
-                output_path,
-                {
-                    "query_id": query_id,
-                    "question": question,
-                    "elapsed_ms": elapsed_ms,
-                    "retrieved": retrieved,
-                    "official_response_stats": stats,
-                },
-            )
-            print(
-                f"Retrieved {query_id}: {len(retrieved)} chunks, "
-                f"{stats['event_nodes']} event nodes in {elapsed_ms:.1f} ms"
-            )
+        current_query_ids = {
+            str(query.get("id") or query.get("query_id")) for query in queries
+        }
+        query_progress = tqdm(
+            total=len(queries),
+            initial=len(completed & current_query_ids),
+            desc="e2rag:retrieve",
+            unit="query",
+            dynamic_ncols=True,
+        )
+        try:
+            for query in queries:
+                query_id = str(query.get("id") or query.get("query_id"))
+                if query_id in completed:
+                    continue
+                question = str(query.get("question") or query.get("query") or "")
+                started = perf_counter()
+                with upstream_output(
+                    upstream_log_path,
+                    visible=args.show_upstream_output,
+                ):
+                    response = await combined_rag.aquery(question, query_param(api, args))
+                elapsed_ms = (perf_counter() - started) * 1000
+                retrieved, stats = retrieved_rows(response, lookup, top_k=args.top_k)
+                append_jsonl(
+                    output_path,
+                    {
+                        "query_id": query_id,
+                        "question": question,
+                        "elapsed_ms": elapsed_ms,
+                        "retrieved": retrieved,
+                        "official_response_stats": stats,
+                    },
+                )
+                query_progress.update(1)
+                query_progress.set_postfix_str(
+                    f"{len(retrieved)} chunks, {stats['event_nodes']} events",
+                    refresh=False,
+                )
+        finally:
+            query_progress.close()
     finally:
         await clients.close()
     print(f"Raw E2RAG results written to: {output_path}")

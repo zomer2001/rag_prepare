@@ -26,6 +26,7 @@ from rag_graph_demo.domain.tkg import (
     SemanticRelationshipCandidate,
     TKGIndexResult,
     TKGSnapshot,
+    interval_is_inverted,
 )
 from rag_graph_demo.services.entity_resolution_service import (
     EntityResolutionService,
@@ -625,6 +626,7 @@ class TKGFusionService:
             stance = MentionStance.UNCERTAIN
         else:
             stance = MentionStance.ASSERTED
+        valid_from, valid_to = self._fact_validity_interval(event, fact)
         assertion = same_fact[-1] if same_fact else self._upsert_assertion(
             snapshot,
             document_id,
@@ -635,8 +637,8 @@ class TKGFusionService:
             evidence=fact.reason or event.summary,
             confidence=event.confidence,
             stance=stance,
-            valid_from=fact.valid_from or event.start_time,
-            valid_to=fact.valid_to,
+            valid_from=valid_from,
+            valid_to=valid_to,
         )
         if same_fact:
             self._upsert_assertion(
@@ -675,6 +677,40 @@ class TKGFusionService:
                     fact.valid_from,
                 )
         return created
+
+    @staticmethod
+    def _fact_validity_interval(event: EventRecord, fact) -> tuple[str | None, str | None]:
+        """Keep event occurrence time separate from assertion validity.
+
+        Creation/update events may establish when a new fact starts.  A
+        termination/supersession instead establishes when an old fact ends, and
+        a later confirmation or denial must not rewrite the historical fact's
+        start date.
+        """
+        if fact.effect_type in {EventEffectType.CREATES, EventEffectType.UPDATES}:
+            valid_from = fact.valid_from or event.start_time
+            valid_to = fact.valid_to
+        elif fact.effect_type in {
+            EventEffectType.TERMINATES,
+            EventEffectType.SUPERSEDES,
+        }:
+            valid_from = fact.valid_from
+            valid_to = fact.valid_to or event.start_time
+        else:
+            valid_from = fact.valid_from
+            valid_to = fact.valid_to
+
+        # Extracted metadata is optional.  One malformed interval must not abort
+        # an otherwise valid document transaction.
+        if interval_is_inverted(valid_from, valid_to):
+            if fact.effect_type in {
+                EventEffectType.TERMINATES,
+                EventEffectType.SUPERSEDES,
+            }:
+                valid_from = None
+            else:
+                valid_to = None
+        return valid_from, valid_to
 
     @staticmethod
     def _append_event_effect(
@@ -740,12 +776,11 @@ class TKGFusionService:
     @staticmethod
     def _build_stance_conflicts(snapshot: TKGSnapshot) -> None:
         existing = {item.conflict_id for item in snapshot.conflicts}
+        mentions_by_assertion: dict[str, list[AssertionMention]] = {}
+        for mention in snapshot.assertion_mentions:
+            mentions_by_assertion.setdefault(mention.assertion_id, []).append(mention)
         for assertion in snapshot.assertions:
-            mentions = [
-                item
-                for item in snapshot.assertion_mentions
-                if item.assertion_id == assertion.assertion_id
-            ]
+            mentions = mentions_by_assertion.get(assertion.assertion_id, [])
             stances = {item.stance for item in mentions}
             if not {MentionStance.ASSERTED, MentionStance.DENIED} <= stances:
                 continue

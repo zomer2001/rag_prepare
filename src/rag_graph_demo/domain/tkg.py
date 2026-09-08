@@ -1,11 +1,72 @@
 from __future__ import annotations
 
-from datetime import datetime
+import calendar
+import re
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from rag_graph_demo.domain.models import utc_now
+
+_PARTIAL_ISO_TIME = re.compile(
+    r"^(?P<year>\d{4})(?:-(?P<month>\d{2})(?:-(?P<day>\d{2}))?)?"
+    r"(?:(?:T| )(?P<time>.+))?$"
+)
+
+
+def _temporal_boundary(value: str, *, upper: bool) -> datetime | None:
+    """Interpret an ISO partial date as an interval boundary.
+
+    A year, month, or day denotes the whole corresponding period.  This keeps
+    mixed-precision values such as ``2023-10-29T02:00`` and ``2023-10-29`` from
+    being rejected merely because their strings have different lengths.
+    """
+    match = _PARTIAL_ISO_TIME.fullmatch(value.strip())
+    if match is None:
+        return None
+    try:
+        year = int(match.group("year"))
+        month_text = match.group("month")
+        day_text = match.group("day")
+        time_text = match.group("time")
+        if time_text is not None:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+            return parsed
+        if month_text is None:
+            return (
+                datetime(year, 12, 31, 23, 59, 59, 999999)
+                if upper
+                else datetime(year, 1, 1)
+            )
+        month = int(month_text)
+        if day_text is None:
+            day = calendar.monthrange(year, month)[1] if upper else 1
+            return (
+                datetime(year, month, day, 23, 59, 59, 999999)
+                if upper
+                else datetime(year, month, day)
+            )
+        day = int(day_text)
+        return (
+            datetime(year, month, day, 23, 59, 59, 999999)
+            if upper
+            else datetime(year, month, day)
+        )
+    except ValueError:
+        return None
+
+
+def interval_is_inverted(valid_from: str | None, valid_to: str | None) -> bool:
+    if not valid_from or not valid_to:
+        return False
+    lower = _temporal_boundary(valid_from, upper=False)
+    upper = _temporal_boundary(valid_to, upper=True)
+    if lower is not None and upper is not None:
+        return lower > upper
+    return valid_from > valid_to
 
 
 class MentionStance(StrEnum):
@@ -129,7 +190,7 @@ class AssertionRecord(BaseModel):
 
     @model_validator(mode="after")
     def validate_interval(self) -> AssertionRecord:
-        if self.valid_from and self.valid_to and self.valid_from > self.valid_to:
+        if interval_is_inverted(self.valid_from, self.valid_to):
             raise ValueError("valid_from must not be later than valid_to")
         return self
 

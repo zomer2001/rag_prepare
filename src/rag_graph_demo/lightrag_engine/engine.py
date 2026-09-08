@@ -261,6 +261,12 @@ class LightRAGEngine:
                 },
                 llm_model_max_async=self._settings.llm_max_concurrency,
                 default_llm_timeout=self._settings.llm_request_timeout_seconds,
+                # LightRAG otherwise applies its own 30s function / 60s worker
+                # deadline, which can cancel the OpenAI client's configured
+                # retry cycle before a transient embedding request recovers.
+                default_embedding_timeout=max(
+                    120, self._settings.embedding_request_timeout_seconds * 2
+                ),
                 embedding_batch_num=self._settings.embedding_batch_size,
                 embedding_func_max_async=self._settings.effective_embedding_concurrency,
                 chunk_token_size=self._settings.chunk_target_tokens,
@@ -508,9 +514,17 @@ class LightRAGEngine:
         This is intentionally post-index: the TKG layer consumes the same semantic
         extraction as the existing graph path and does not make a duplicate LLM call.
         """
+        values = await self.get_documents_semantic_extractions([document_id])
+        return values[document_id]
+
+    async def get_documents_semantic_extractions(
+        self, document_ids: list[str]
+    ) -> dict[str, SemanticExtractionBatch]:
+        """Read many document views with one graph and chunk-store snapshot."""
+        if not document_ids:
+            return {}
         rag = await self.initialize()
         graph = rag.chunk_entity_relation_graph
-        file_marker = f"{document_id}__"
         nodes = await graph.get_all_nodes()
         edges = await graph.get_all_edges()
         source_ids = {
@@ -524,9 +538,28 @@ class LightRAGEngine:
             if sorted_source_ids
             else []
         )
+        chunk_rows = list(zip(sorted_source_ids, chunks, strict=True))
+        return {
+            document_id: self._semantic_extraction_from_records(
+                document_id,
+                nodes,
+                edges,
+                chunk_rows,
+            )
+            for document_id in document_ids
+        }
+
+    @staticmethod
+    def _semantic_extraction_from_records(
+        document_id: str,
+        nodes: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+        chunk_rows: list[tuple[str, Any]],
+    ) -> SemanticExtractionBatch:
+        file_marker = f"{document_id}__"
         chunk_content = {
             source_id: str(chunk.get("content") or "")
-            for source_id, chunk in zip(sorted_source_ids, chunks, strict=True)
+            for source_id, chunk in chunk_rows
             if chunk
             and file_marker in str(chunk.get("file_path") or "")
             and str(chunk.get("content") or "").strip()

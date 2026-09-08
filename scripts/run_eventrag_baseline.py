@@ -79,10 +79,31 @@ def upstream_revision(root: Path) -> str:
         return "unknown"
 
 
-def write_or_validate_manifest(path: Path, expected: dict[str, Any]) -> None:
+QUERY_MANIFEST_KEYS = frozenset({"query_sha256", "queries"})
+
+
+def write_or_validate_manifest(
+    path: Path,
+    expected: dict[str, Any],
+    *,
+    allow_query_set_change: bool = False,
+) -> None:
     if path.is_file():
         existing = json.loads(path.read_text(encoding="utf-8"))
         if existing != expected:
+            if allow_query_set_change:
+                existing_index = {
+                    key: value
+                    for key, value in existing.items()
+                    if key not in QUERY_MANIFEST_KEYS
+                }
+                expected_index = {
+                    key: value
+                    for key, value in expected.items()
+                    if key not in QUERY_MANIFEST_KEYS
+                }
+                if existing_index == expected_index:
+                    return
             if not (path.parent / "index_complete.json").is_file():
                 path.write_text(
                     json.dumps(expected, ensure_ascii=False, indent=2) + "\n",
@@ -115,6 +136,41 @@ def append_jsonl(path: Path, value: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(value, ensure_ascii=False, default=str) + "\n")
         handle.flush()
+
+
+def load_response_cache(path: Path) -> dict[str, str]:
+    """Load complete cache records, ignoring a partial final write after interruption."""
+    if not path.is_file():
+        return {}
+    cache: dict[str, str] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                key = record["key"]
+                content = record["content"]
+                if not isinstance(key, str) or not isinstance(content, str):
+                    raise TypeError("cache key and content must be strings")
+            except (json.JSONDecodeError, KeyError, TypeError):
+                print(
+                    f"Ignoring incomplete EventRAG extraction cache record "
+                    f"at {path}:{line_number}",
+                    file=sys.stderr,
+                )
+                continue
+            cache[key] = content
+    return cache
+
+
+def append_response_cache(path: Path, *, key: str, content: str) -> None:
+    """Durably append one completed model response before indexing continues."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"key": key, "content": content}, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def import_eventrag(eventrag_root: Path) -> dict[str, Any]:
@@ -215,6 +271,7 @@ class ModelClients:
         extraction_max_tokens: int,
         max_entities_per_chunk: int,
         max_relationships_per_chunk: int,
+        extraction_cache_path: Path,
     ) -> None:
         self.deepseek_model = deepseek_model
         self.zhipu_model = zhipu_model
@@ -222,6 +279,10 @@ class ModelClients:
         self.extraction_max_tokens = extraction_max_tokens
         self.max_entities_per_chunk = max_entities_per_chunk
         self.max_relationships_per_chunk = max_relationships_per_chunk
+        self._extraction_cache_path = extraction_cache_path
+        self._extraction_cache = load_response_cache(extraction_cache_path)
+        self._extraction_cache_lock = asyncio.Lock()
+        self._extraction_cache_hits = 0
         self._deepseek = AsyncOpenAI(
             api_key=deepseek_key,
             base_url=deepseek_base_url,
@@ -236,6 +297,34 @@ class ModelClients:
         )
         self._llm_limit = asyncio.Semaphore(llm_concurrency)
         self._embedding_limit = asyncio.Semaphore(embedding_concurrency)
+
+    def _extraction_cache_key(self, request: dict[str, Any]) -> str:
+        payload = {
+            "version": 1,
+            "request": request,
+            "max_entities_per_chunk": self.max_entities_per_chunk,
+            "max_relationships_per_chunk": self.max_relationships_per_chunk,
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def _store_extraction_response(self, key: str, content: str) -> str:
+        async with self._extraction_cache_lock:
+            existing = self._extraction_cache.get(key)
+            if existing is not None:
+                return existing
+            append_response_cache(
+                self._extraction_cache_path,
+                key=key,
+                content=content,
+            )
+            self._extraction_cache[key] = content
+            return content
 
     async def complete(
         self,
@@ -268,15 +357,27 @@ class ModelClients:
                 int(request.get("max_tokens", self.extraction_max_tokens)),
                 self.extraction_max_tokens,
             )
+            cache_key = self._extraction_cache_key(request)
+            cached = self._extraction_cache.get(cache_key)
+            if cached is not None:
+                self._extraction_cache_hits += 1
+                if self._extraction_cache_hits == 1 or self._extraction_cache_hits % 50 == 0:
+                    print(
+                        "EventRAG extraction cache hits: "
+                        f"{self._extraction_cache_hits} "
+                        f"({len(self._extraction_cache)} saved responses)"
+                    )
+                return cached
         async with self._llm_limit:
             response = await self._deepseek.chat.completions.create(**request)
         content = response.choices[0].message.content or ""
         if is_extraction:
-            return truncate_extraction_response(
+            content = truncate_extraction_response(
                 content,
                 max_entities=self.max_entities_per_chunk,
                 max_relationships=self.max_relationships_per_chunk,
             )
+            return await self._store_extraction_response(cache_key, content)
         return content
 
     async def embed(self, texts: list[str]) -> np.ndarray:
@@ -559,11 +660,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--neo4j-user")
     parser.add_argument("--neo4j-password")
     parser.add_argument("--entity-similarity-threshold", type=float, default=0.8)
+    parser.add_argument(
+        "--allow-query-set-change",
+        action="store_true",
+        help="For retrieve only, reuse an index when only query hash/count changes.",
+    )
     return parser.parse_args()
 
 
 async def run(args: argparse.Namespace) -> int:
     load_dotenv(args.env_file.resolve())
+    if args.allow_query_set_change and args.stage != "retrieve":
+        raise ValueError("--allow-query-set-change is only valid with --stage retrieve")
     args.llm_model = args.llm_model or os.getenv("DEEPSEEK_EXTRACTION_MODEL", "deepseek-v4-flash")
     args.llm_base_url = args.llm_base_url or os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     args.embedding_model = args.embedding_model or os.getenv("ZHIPU_EMBEDDING_MODEL", "embedding-3")
@@ -630,7 +738,11 @@ async def run(args: argparse.Namespace) -> int:
         "max_relationships_per_chunk": args.max_relationships_per_chunk,
         "top_k": args.top_k,
     }
-    write_or_validate_manifest(runtime_dir / "adapter_manifest.json", manifest)
+    write_or_validate_manifest(
+        runtime_dir / "adapter_manifest.json",
+        manifest,
+        allow_query_set_change=args.allow_query_set_change,
+    )
     await check_services(args)
 
     api = import_eventrag(eventrag_root)
@@ -659,6 +771,7 @@ async def run(args: argparse.Namespace) -> int:
         extraction_max_tokens=args.extraction_max_tokens,
         max_entities_per_chunk=args.max_entities_per_chunk,
         max_relationships_per_chunk=args.max_relationships_per_chunk,
+        extraction_cache_path=runtime_dir / "extraction_response_cache.jsonl",
     )
 
     async def eventrag_complete(*model_args: Any, **model_kwargs: Any) -> str:

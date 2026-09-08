@@ -13,6 +13,7 @@ from rag_graph_demo.domain.tkg import (
     TKGQueryRequest,
     TKGQueryResponse,
     TKGSnapshot,
+    interval_is_inverted,
 )
 from rag_graph_demo.storage.atomic_json import read_json, write_json_atomic
 
@@ -145,7 +146,7 @@ class TKGRegistry:
         for assertion in raw.get("assertions", []):
             valid_from = assertion.get("valid_from")
             valid_to = assertion.get("valid_to")
-            if valid_from and valid_to and valid_from > valid_to:
+            if interval_is_inverted(valid_from, valid_to):
                 stated_valid_to = assertion.get("stated_valid_to")
                 assertion["valid_to"] = (
                     stated_valid_to
@@ -198,9 +199,9 @@ class TKGRegistry:
         assertion_mentions: dict[str, list[AssertionMention]] = {}
         for mention in snapshot.assertion_mentions:
             assertion_mentions.setdefault(mention.assertion_id, []).append(mention)
-        effects_by_assertion: dict[str, list[str]] = {}
+        effects_by_assertion: dict[str, list] = {}
         for effect in snapshot.event_effects:
-            effects_by_assertion.setdefault(effect.assertion_id, []).append(effect.effect_id)
+            effects_by_assertion.setdefault(effect.assertion_id, []).append(effect)
         retained_assertions: list[AssertionRecord] = []
         for assertion in snapshot.assertions:
             mentions = assertion_mentions.get(assertion.assertion_id, [])
@@ -208,7 +209,7 @@ class TKGRegistry:
             if not mentions and not effects:
                 continue
             assertion.mention_ids = sorted(item.mention_id for item in mentions)
-            assertion.event_effect_ids = sorted(effects)
+            assertion.event_effect_ids = sorted(item.effect_id for item in effects)
             stances = {item.stance.value for item in mentions}
             if "asserted" in stances and "denied" in stances:
                 assertion.status = AssertionStatus.DISPUTED
@@ -221,11 +222,7 @@ class TKGRegistry:
             assertion.valid_to = assertion.stated_valid_to
             assertion.invalidated_at = None
             lifecycle_effects = sorted(
-                (
-                    item
-                    for item in snapshot.event_effects
-                    if item.assertion_id == assertion.assertion_id
-                ),
+                effects,
                 key=lambda item: (item.effective_time or "", item.created_at, item.effect_id),
             )
             for effect in lifecycle_effects:
@@ -251,11 +248,7 @@ class TKGRegistry:
                     assertion.status = AssertionStatus.SUPERSEDED
                     assertion.valid_to = effect.effective_time
                     assertion.invalidated_at = effect.created_at
-            if (
-                assertion.valid_from
-                and assertion.valid_to
-                and assertion.valid_from > assertion.valid_to
-            ):
+            if interval_is_inverted(assertion.valid_from, assertion.valid_to):
                 logger.warning(
                     "Discarding inverted derived interval for assertion %s: %s > %s",
                     assertion.assertion_id,

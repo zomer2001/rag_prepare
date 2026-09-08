@@ -1,5 +1,8 @@
+import json
+
 import pytest
 
+from rag_graph_demo.agentic.models import NeedItem
 from rag_graph_demo.config import Settings
 from rag_graph_demo.evaluation import runner as runner_module
 from rag_graph_demo.evaluation.models import (
@@ -9,6 +12,7 @@ from rag_graph_demo.evaluation.models import (
 )
 from rag_graph_demo.evaluation.runner import (
     EvaluationRunner,
+    _retry_timeout,
     embedding_identity,
     evoneed_diagnostics,
     light_entity_fingerprint,
@@ -16,6 +20,28 @@ from rag_graph_demo.evaluation.runner import (
     lightrag_benchmark_fingerprint,
     retrieval_diagnostics,
 )
+from rag_graph_demo.retrieval.evolink import EvoLinkResult
+from rag_graph_demo.retrieval.models import UnifiedRetrievalResult
+
+
+@pytest.mark.asyncio
+async def test_timeout_retry_recovers_without_skipping_operation(monkeypatch) -> None:
+    calls = 0
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("temporary embedding timeout")
+        return "ready"
+
+    async def no_wait(_delay):
+        return None
+
+    monkeypatch.setattr(runner_module.asyncio, "sleep", no_wait)
+
+    assert await _retry_timeout(operation, attempts=3, label="test") == "ready"
+    assert calls == 2
 
 
 def _dataset() -> BenchmarkDataset:
@@ -61,6 +87,16 @@ def test_ours_evolink_is_a_distinct_controlled_three_path_method(tmp_path) -> No
     assert runner.light_entity_engine is None
     assert runner.tkg_graph_store is None
     assert runner.evolink_graph_store is None
+    runner._ensure_output_manifest()
+    manifest = json.loads((tmp_path / "output" / "run_manifest.json").read_text())
+    assert manifest["evolink_profile"] == {
+        "version": "ours_evolink_v3_single_shared_expansion",
+        "seed_limit_per_name": 3,
+        "max_entity_names": 8,
+        "max_event_seeds": 5,
+        "expansion_limit": 20,
+        "link_weight": 0.1,
+    }
 
 
 def test_evolink_agentic_methods_are_registered_without_a_new_index(tmp_path) -> None:
@@ -69,7 +105,14 @@ def test_evolink_agentic_methods_are_registered_without_a_new_index(tmp_path) ->
         Settings(_env_file=None, embedding_provider="zhipu"),
         runtime_dir=tmp_path / "runtime",
         output_dir=tmp_path / "output",
-        methods=("agentic_ours_evolink", "ours_evoneed"),
+        methods=(
+            "agentic_ours_evolink",
+            "ours_evoneed",
+            "ours_evoneed_planned",
+            "ours_evoneed_planned_shared",
+            "ours_evoneed_equal",
+            "ours_evoneed_dynamic",
+        ),
     )
 
     assert runner._method_retriever(
@@ -78,7 +121,140 @@ def test_evolink_agentic_methods_are_registered_without_a_new_index(tmp_path) ->
     assert runner._method_retriever(
         "ours_evoneed", None, None
     ).__func__ is runner._retrieve_ours_evoneed.__func__
+    assert runner._method_retriever(
+        "ours_evoneed_planned", None, None
+    ).__func__ is runner._retrieve_ours_evoneed_planned.__func__
+    assert runner._method_retriever(
+        "ours_evoneed_planned_shared", None, None
+    ).__func__ is runner._retrieve_ours_evoneed_planned_shared.__func__
+    assert runner._method_retriever(
+        "ours_evoneed_equal", None, None
+    ).__func__ is runner._retrieve_ours_evoneed_equal.__func__
+    assert runner._method_retriever(
+        "ours_evoneed_dynamic", None, None
+    ).__func__ is runner._retrieve_ours_evoneed_dynamic.__func__
     assert runner.tkg_vector_index is None
+
+
+def test_planned_evoneed_manifest_records_first_round_strategy(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_evoneed_planned",),
+    )
+
+    runner._ensure_output_manifest()
+    manifest = json.loads((tmp_path / "output" / "run_manifest.json").read_text())
+
+    assert manifest["evoneed_profile"]["planned_initial_retrieval"] == {
+        "mode": "planned_needs",
+        "parallel_actions": True,
+        "max_planned_actions": 3,
+    }
+
+
+def test_planned_shared_evoneed_manifest_records_fixed_total_budget(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_evoneed_planned_shared",),
+    )
+
+    runner._ensure_output_manifest()
+    manifest = json.loads((tmp_path / "output" / "run_manifest.json").read_text())
+
+    assert manifest["evoneed_profile"]["planned_shared_budget"] == {
+        "mode": "planned_needs",
+        "parallel_actions": True,
+        "max_planned_actions": 3,
+        "route_budget_mode": "shared_total",
+        "total_candidate_budget": "top_k",
+        "allocation": "planner_proposed_normalized_to_top_k",
+    }
+
+
+def test_equal_and_dynamic_evoneed_share_the_same_total_budget(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_evoneed_equal", "ours_evoneed_dynamic"),
+    )
+
+    runner._ensure_output_manifest()
+    manifest = json.loads((tmp_path / "output" / "run_manifest.json").read_text())
+    profile = manifest["evoneed_profile"]
+
+    assert profile["joint_planner_calls_per_query"] == 1
+    assert profile["cross_path_expansion"] == "one_shared_evolink_after_all_routes"
+    assert profile["equal_budget"]["total_initial_budget"] == 60
+    assert profile["dynamic_budget"]["total_initial_budget"] == 60
+    assert profile["dynamic_budget"]["minimum_active_route_budget"] == 5
+
+
+@pytest.mark.asyncio
+async def test_evoneed_routes_share_one_post_retrieval_evolink_call(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_evoneed_equal",),
+    )
+
+    class FakeOrchestrator:
+        def __init__(self) -> None:
+            self.routes = []
+            self.coordinate_calls = 0
+
+        async def retrieve(self, question, **kwargs):
+            self.routes.append((question, kwargs["channels"], kwargs["plan_override"]))
+            return UnifiedRetrievalResult(
+                plan=kwargs["plan_override"],
+                bundles=(),
+                candidates={"vector": (), "graph": (), "event": ()},
+            )
+
+        async def coordinate_planned_results(self, plans, results, *, limit):
+            self.coordinate_calls += 1
+            assert len(plans) == len(results) == 2
+            assert limit == 20
+            return EvoLinkResult(), None
+
+    orchestrator = FakeOrchestrator()
+    runner.unified_orchestrator = orchestrator  # type: ignore[assignment]
+    needs = [
+        NeedItem(
+            need_id="text",
+            knowledge_type="text_evidence",
+            query="source wording",
+            route="vector",
+        ),
+        NeedItem(
+            need_id="event",
+            knowledge_type="evolution_evidence",
+            query="change timeline",
+            route="event",
+            entities=["Acme"],
+            state_intents=["change"],
+            expand_event_chain=True,
+        ),
+    ]
+
+    batches = await runner._retrieve_evoneed_actions(needs, [30, 30])
+
+    assert len(batches) == 2
+    assert orchestrator.coordinate_calls == 1
+    assert [route for _, route, _ in orchestrator.routes] == [
+        {"vector"},
+        {"event"},
+    ]
+    assert all(plan is not None for _, _, plan in orchestrator.routes)
 
 
 def test_ours_tkg_has_no_controlled_lightrag_method_dependency(tmp_path) -> None:

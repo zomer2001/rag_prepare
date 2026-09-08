@@ -14,6 +14,25 @@ from rag_graph_demo.domain.tkg import (
 )
 from rag_graph_demo.retrieval.models import EvidenceCandidate, QueryPlan
 
+GENERIC_ENTITY_NAMES = {
+    "business leader",
+    "business leaders",
+    "company",
+    "companies",
+    "entity",
+    "group",
+    "individual",
+    "organization",
+    "organisations",
+    "organizations",
+    "people",
+    "person",
+    "player",
+    "players",
+    "prosecutor",
+    "prosecutors",
+}
+
 
 class CoordinationGraphStore(Protocol):
     async def query(self, request: TKGQueryRequest) -> TKGQueryResponse: ...
@@ -34,8 +53,20 @@ class EvoLinkResult:
 class EvoLinkCoordinator:
     """Connect semantic assertions and events without replacing the three routes."""
 
-    def __init__(self, graph_store: CoordinationGraphStore) -> None:
+    def __init__(
+        self,
+        graph_store: CoordinationGraphStore,
+        *,
+        seed_limit_per_name: int = 3,
+        max_entity_names: int = 8,
+        max_event_seeds: int = 5,
+    ) -> None:
+        if min(seed_limit_per_name, max_entity_names, max_event_seeds) < 1:
+            raise ValueError("EvoLink seed limits must be positive")
         self._graph_store = graph_store
+        self._seed_limit_per_name = seed_limit_per_name
+        self._max_entity_names = max_entity_names
+        self._max_event_seeds = max_event_seeds
 
     async def coordinate(
         self,
@@ -45,7 +76,10 @@ class EvoLinkCoordinator:
         event_candidates: Iterable[EvidenceCandidate] = (),
         limit: int,
     ) -> EvoLinkResult:
-        names = self._unique([*plan.entities, *entity_names], limit=8)
+        names = self._useful_names(
+            [*plan.entities, *entity_names],
+            limit=self._max_entity_names,
+        )
         seed_queries = await asyncio.gather(
             *(
                 self._graph_store.query(
@@ -53,22 +87,28 @@ class EvoLinkCoordinator:
                         entity_name=name,
                         include_inactive=True,
                         include_disputed=True,
-                        limit=limit,
+                        limit=self._seed_limit_per_name,
                     )
                 )
                 for name in names
             )
         )
-        entity_ids = self._unique(
-            [item.entity_id for result in seed_queries for item in result.entities],
+        entity_groups = [
+            [item.entity_id for item in result.entities]
+            for result in seed_queries
+        ]
+        assertion_groups = [
+            [item.assertion_id for item in result.assertions]
+            for result in seed_queries
+        ]
+        # Round-robin selection prevents the first broad name from consuming the
+        # complete seed budget before later, more specific names are considered.
+        entity_ids = self._round_robin_unique(
+            entity_groups,
             limit=limit,
         )
-        assertion_ids = self._unique(
-            [
-                item.assertion_id
-                for result in seed_queries
-                for item in result.assertions
-            ],
+        assertion_ids = self._round_robin_unique(
+            assertion_groups,
             limit=limit,
         )
         event_ids = self._unique(
@@ -76,7 +116,7 @@ class EvoLinkCoordinator:
                 str(item.metadata.get("event_id") or "")
                 for item in event_candidates
             ],
-            limit=limit,
+            limit=min(limit, self._max_event_seeds),
         )
         if not entity_ids and not assertion_ids and not event_ids:
             return EvoLinkResult(
@@ -88,11 +128,21 @@ class EvoLinkCoordinator:
                 }
             )
 
+        entity_scores = self._seed_scores(entity_groups, entity_ids)
+        assertion_scores = self._seed_scores(assertion_groups, assertion_ids)
+        event_scores = {
+            event_id: 1.0 / rank
+            for rank, event_id in enumerate(event_ids, start=1)
+        }
         expansion = await self._graph_store.expand(
             TKGExpansionRequest(
                 entity_ids=entity_ids,
                 assertion_ids=assertion_ids,
                 event_ids=event_ids,
+                entity_scores=entity_scores,
+                assertion_scores=assertion_scores,
+                event_scores=event_scores,
+                rank_by_seed_score=True,
                 start_time=plan.start_time,
                 end_time=plan.end_time,
                 include_inactive=True,
@@ -113,6 +163,8 @@ class EvoLinkCoordinator:
                 "seed_entity_count": len(entity_ids),
                 "seed_assertion_count": len(assertion_ids),
                 "seed_event_count": len(event_ids),
+                "seed_limit_per_name": self._seed_limit_per_name,
+                "expansion_limit": limit,
                 "linked_assertion_count": len(expansion.assertions),
                 "linked_event_count": len(expansion.events),
                 "linked_effect_count": len(expansion.effects),
@@ -136,7 +188,18 @@ class EvoLinkCoordinator:
             for assertion_id in conflict.assertion_ids
         }
         result: list[EvidenceCandidate] = []
-        for mention in expansion.mentions:
+        assertion_rank = {
+            item.assertion_id: rank
+            for rank, item in enumerate(expansion.assertions, start=1)
+        }
+        ordered_mentions = sorted(
+            expansion.mentions,
+            key=lambda item: (
+                assertion_rank.get(item.assertion_id, len(assertion_rank) + 1),
+                item.mention_id,
+            ),
+        )
+        for mention in ordered_mentions:
             assertion = assertions.get(mention.assertion_id)
             if assertion is None:
                 continue
@@ -154,6 +217,7 @@ class EvoLinkCoordinator:
                     metadata={
                         "source": "statement_tkg",
                         "linked_by": "ours_evolink",
+                        "link_rank": assertion_rank.get(assertion.assertion_id),
                         "assertion_id": assertion.assertion_id,
                         "statement": (
                             f"{subject.canonical_name if subject else assertion.subject_id} "
@@ -184,7 +248,22 @@ class EvoLinkCoordinator:
             if item.get("event_id")
         }
         result: list[EvidenceCandidate] = []
-        for mention in expansion.event_mentions:
+        event_rank = {
+            str(item.get("event_id")): rank
+            for rank, item in enumerate(expansion.events, start=1)
+            if item.get("event_id")
+        }
+        ordered_mentions = sorted(
+            expansion.event_mentions,
+            key=lambda item: (
+                event_rank.get(
+                    str(item.get("event_id") or ""),
+                    len(event_rank) + 1,
+                ),
+                str(item.get("mention_id") or ""),
+            ),
+        )
+        for mention in ordered_mentions:
             event_id = str(mention.get("event_id") or "")
             event = events.get(event_id, {})
             evidence = str(mention.get("evidence") or "").strip()
@@ -208,6 +287,7 @@ class EvoLinkCoordinator:
                     metadata={
                         "source": "event_tkg",
                         "linked_by": "ours_evolink",
+                        "link_rank": event_rank.get(event_id),
                         "event_id": event_id,
                         "event_type": event.get("event_type"),
                         "event_summary": event.get("summary"),
@@ -326,3 +406,53 @@ class EvoLinkCoordinator:
             if len(result) >= limit:
                 break
         return result
+
+    @classmethod
+    def _useful_names(cls, values: Iterable[str], *, limit: int) -> list[str]:
+        return cls._unique(
+            (
+                value
+                for value in values
+                if " ".join(str(value).split()).strip().casefold()
+                not in GENERIC_ENTITY_NAMES
+            ),
+            limit=limit,
+        )
+
+    @staticmethod
+    def _round_robin_unique(
+        groups: Iterable[Iterable[str]],
+        *,
+        limit: int,
+    ) -> list[str]:
+        pending = [list(group) for group in groups]
+        result: list[str] = []
+        seen: set[str] = set()
+        width = max((len(group) for group in pending), default=0)
+        for position in range(width):
+            for group in pending:
+                if position >= len(group):
+                    continue
+                value = " ".join(str(group[position]).split()).strip()
+                key = value.casefold()
+                if value and key not in seen:
+                    result.append(value)
+                    seen.add(key)
+                if len(result) >= limit:
+                    return result
+        return result
+
+    @staticmethod
+    def _seed_scores(
+        groups: list[list[str]],
+        selected: list[str],
+    ) -> dict[str, float]:
+        selected_set = set(selected)
+        scores: dict[str, float] = {}
+        for name_rank, group in enumerate(groups, start=1):
+            for item_rank, value in enumerate(group, start=1):
+                if value not in selected_set:
+                    continue
+                score = 1.0 / (name_rank * item_rank)
+                scores[value] = max(scores.get(value, 0.0), score)
+        return scores

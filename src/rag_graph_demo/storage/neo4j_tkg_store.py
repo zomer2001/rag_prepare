@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
@@ -16,6 +17,8 @@ from rag_graph_demo.domain.tkg import (
     TKGQueryResponse,
     TKGSnapshot,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _props(model: Any, *, exclude: set[str] | None = None) -> dict[str, Any]:
@@ -43,10 +46,12 @@ class Neo4jTKGStore:
         database: str = "neo4j",
         workspace_id: str = "default",
         driver: AsyncDriver | None = None,
+        write_batch_size: int = 500,
     ) -> None:
         self._driver = driver or AsyncGraphDatabase.driver(uri, auth=(user, password))
         self._database = database
         self._workspace_id = workspace_id
+        self._write_batch_size = max(1, write_batch_size)
 
     async def close(self) -> None:
         await self._driver.close()
@@ -149,234 +154,281 @@ class Neo4jTKGStore:
             event_mentions or [],
             event_relations or [],
         )
-        async with self._driver.session(database=self._database) as session:
-            await session.execute_write(
-                self._replace_tx,
-                payload,
-                self._workspace_id,
-            )
-
-    @staticmethod
-    async def _replace_tx(
-        tx: Any,
-        payload: dict[str, Any],
-        workspace_id: str,
-    ) -> None:
-        await tx.run(
-            "MATCH (n:RagTKG {workspace_id: $workspace_id}) DETACH DELETE n",
-            workspace_id=workspace_id,
-        )
         for rows in payload.values():
             if not isinstance(rows, list):
                 continue
             for row in rows:
                 target = row.get("props", row)
-                target["workspace_id"] = workspace_id
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGEntity)
-            SET n = row.props, n.aliases = row.aliases,
-                n.source_document_ids = row.source_document_ids,
-                n.alias_text = row.alias_text
-            """,
-            rows=payload["entities"],
+                target["workspace_id"] = self._workspace_id
+
+        stages = (
+            (
+                "entities",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGEntity)
+                SET n = row.props, n.aliases = row.aliases,
+                    n.source_document_ids = row.source_document_ids,
+                    n.alias_text = row.alias_text
+                """,
+            ),
+            (
+                "predicates",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGPredicate)
+                SET n = row
+                """,
+            ),
+            (
+                "assertions",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGAssertion)
+                SET n = row.props, n.mention_ids = row.mention_ids,
+                    n.event_effect_ids = row.event_effect_ids
+                WITH n, row
+                MATCH (s:RagTKGEntity {
+                  workspace_id: $workspace_id, entity_id: row.subject_id
+                })
+                MATCH (o:RagTKGEntity {
+                  workspace_id: $workspace_id, entity_id: row.object_id
+                })
+                MATCH (p:RagTKGPredicate {
+                  workspace_id: $workspace_id, predicate_id: n.predicate_id
+                })
+                CREATE (n)-[:SUBJECT]->(s)
+                CREATE (n)-[:OBJECT]->(o)
+                CREATE (n)-[:PREDICATE]->(p)
+                """,
+            ),
+            (
+                "events",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGEvent)
+                SET n = row.props, n.actors = row.actors, n.objects = row.objects,
+                    n.source_document_ids = row.source_document_ids
+                """,
+            ),
+            (
+                "event_relations",
+                """
+                UNWIND $rows AS row
+                MATCH (source:RagTKGEvent {
+                  workspace_id: $workspace_id, event_id: row.source_event_id
+                })
+                MATCH (target:RagTKGEvent {
+                  workspace_id: $workspace_id, event_id: row.target_event_id
+                })
+                CREATE (source)-[:RELATED_EVENT {
+                  relation_id: row.relation_id,
+                  relation_type: row.relation_type,
+                  confidence: row.confidence,
+                  shared_entities: row.shared_entities
+                }]->(target)
+                """,
+            ),
+            (
+                "documents",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGDocument)
+                SET n = row
+                """,
+            ),
+            (
+                "mentions",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGMention)
+                SET n = row.props
+                WITH n, row
+                OPTIONAL MATCH (e:RagTKGEntity {
+                  workspace_id: $workspace_id, entity_id: row.entity_id
+                })
+                OPTIONAL MATCH (a:RagTKGAssertion {
+                  workspace_id: $workspace_id, assertion_id: row.assertion_id
+                })
+                OPTIONAL MATCH (v:RagTKGEvent {
+                  workspace_id: $workspace_id, event_id: row.event_id
+                })
+                OPTIONAL MATCH (d:RagTKGDocument {
+                  workspace_id: $workspace_id, document_id: row.document_id
+                })
+                FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END |
+                  CREATE (n)-[:MENTIONS]->(e))
+                FOREACH (_ IN CASE WHEN a IS NULL THEN [] ELSE [1] END |
+                  CREATE (n)-[:SUPPORTS]->(a))
+                FOREACH (_ IN CASE WHEN v IS NULL THEN [] ELSE [1] END |
+                  CREATE (n)-[:MENTIONS_EVENT]->(v))
+                FOREACH (_ IN CASE WHEN d IS NULL THEN [] ELSE [1] END |
+                  CREATE (n)-[:FROM_DOCUMENT]->(d))
+                """,
+            ),
+            (
+                "event_links",
+                """
+                UNWIND $rows AS row
+                MATCH (v:RagTKGEvent {
+                  workspace_id: $workspace_id, event_id: row.event_id
+                })
+                MATCH (e:RagTKGEntity {
+                  workspace_id: $workspace_id, entity_id: row.entity_id
+                })
+                CREATE (v)-[:HAS_PARTICIPANT {
+                  link_id: row.link_id, role: row.role,
+                  surface_form: row.surface_form, document_id: row.document_id
+                }]->(e)
+                """,
+            ),
+            (
+                "effects",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGEffect)
+                SET n = row.props
+                WITH n, row
+                MATCH (v:RagTKGEvent {
+                  workspace_id: $workspace_id, event_id: row.event_id
+                })
+                MATCH (a:RagTKGAssertion {
+                  workspace_id: $workspace_id, assertion_id: row.assertion_id
+                })
+                CREATE (v)-[:HAS_EFFECT]->(n)-[:AFFECTS]->(a)
+                """,
+            ),
+            (
+                "conflicts",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGConflict)
+                SET n = row.props, n.assertion_ids = row.assertion_ids,
+                    n.mention_ids = row.mention_ids
+                WITH n, row
+                UNWIND row.assertion_ids AS assertion_id
+                MATCH (a:RagTKGAssertion {
+                  workspace_id: $workspace_id, assertion_id: assertion_id
+                })
+                CREATE (n)-[:INVOLVES]->(a)
+                """,
+            ),
+            (
+                "decisions",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGDecision)
+                SET n = row.props, n.candidate_entity_ids = row.candidate_entity_ids
+                WITH n, row
+                OPTIONAL MATCH (e:RagTKGEntity {
+                  workspace_id: $workspace_id, entity_id: row.selected_entity_id
+                })
+                FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END |
+                  CREATE (n)-[:SELECTED]->(e))
+                """,
+            ),
+            (
+                "reviews",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGReview)
+                SET n = row.props, n.candidate_entity_ids = row.candidate_entity_ids,
+                    n.candidate_scores_json = row.candidate_scores_json
+                WITH n, row
+                OPTIONAL MATCH (e:RagTKGEntity {
+                  workspace_id: $workspace_id, entity_id: row.provisional_entity_id
+                })
+                FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END |
+                  CREATE (n)-[:PROVISIONAL]->(e))
+                """,
+            ),
+            (
+                "merges",
+                """
+                UNWIND $rows AS row
+                CREATE (n:RagTKG:RagTKGMerge)
+                SET n = row.props
+                WITH n, row
+                OPTIONAL MATCH (s:RagTKGEntity {
+                  workspace_id: $workspace_id, entity_id: row.source_entity_id
+                })
+                OPTIONAL MATCH (t:RagTKGEntity {
+                  workspace_id: $workspace_id, entity_id: row.target_entity_id
+                })
+                FOREACH (_ IN CASE WHEN s IS NULL THEN [] ELSE [1] END |
+                  CREATE (n)-[:SOURCE]->(s))
+                FOREACH (_ IN CASE WHEN t IS NULL THEN [] ELSE [1] END |
+                  CREATE (n)-[:TARGET]->(t))
+                """,
+            ),
         )
-        await tx.run(
+        async with self._driver.session(database=self._database) as session:
+            deleted = 0
+            while True:
+                count = await session.execute_write(
+                    self._delete_batch_tx,
+                    self._workspace_id,
+                    self._write_batch_size,
+                )
+                deleted += count
+                if count == 0:
+                    break
+            if deleted:
+                logger.info(
+                    "Deleted %s existing Neo4j nodes for workspace %s",
+                    deleted,
+                    self._workspace_id,
+                )
+            for name, statement in stages:
+                rows = payload[name]
+                if not rows:
+                    continue
+                for start in range(0, len(rows), self._write_batch_size):
+                    await session.execute_write(
+                        self._write_batch_tx,
+                        statement,
+                        rows[start : start + self._write_batch_size],
+                        self._workspace_id,
+                    )
+                logger.info(
+                    "Synced %s Neo4j %s row(s) for workspace %s",
+                    len(rows),
+                    name,
+                    self._workspace_id,
+                )
+
+    @staticmethod
+    async def _delete_batch_tx(
+        tx: Any,
+        workspace_id: str,
+        batch_size: int,
+    ) -> int:
+        result = await tx.run(
             """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGAssertion)
-            SET n = row.props, n.mention_ids = row.mention_ids,
-                n.event_effect_ids = row.event_effect_ids
-            WITH n, row
-            MATCH (s:RagTKGEntity {workspace_id: $workspace_id, entity_id: row.subject_id})
-            MATCH (o:RagTKGEntity {workspace_id: $workspace_id, entity_id: row.object_id})
-            CREATE (n)-[:SUBJECT]->(s)
-            CREATE (n)-[:OBJECT]->(o)
+            MATCH (n:RagTKG {workspace_id: $workspace_id})
+            WITH n LIMIT $batch_size
+            DETACH DELETE n
+            RETURN count(n) AS deleted
             """,
-            rows=payload["assertions"],
+            workspace_id=workspace_id,
+            batch_size=batch_size,
+        )
+        row = await result.single()
+        return int(row["deleted"] if row else 0)
+
+    @staticmethod
+    async def _write_batch_tx(
+        tx: Any,
+        statement: str,
+        rows: list[dict[str, Any]],
+        workspace_id: str,
+    ) -> None:
+        result = await tx.run(
+            statement,
+            rows=rows,
             workspace_id=workspace_id,
         )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGPredicate)
-            SET n = row
-            """,
-            rows=payload["predicates"],
-        )
-        await tx.run(
-            """
-            MATCH (a:RagTKGAssertion {workspace_id: $workspace_id})
-            MATCH (p:RagTKGPredicate {
-              workspace_id: $workspace_id, predicate_id: a.predicate_id
-            })
-            CREATE (a)-[:PREDICATE]->(p)
-            """,
-            workspace_id=workspace_id,
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGEvent)
-            SET n = row.props, n.actors = row.actors, n.objects = row.objects,
-                n.source_document_ids = row.source_document_ids
-            """,
-            rows=payload["events"],
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            MATCH (source:RagTKGEvent {
-              workspace_id: $workspace_id, event_id: row.source_event_id
-            })
-            MATCH (target:RagTKGEvent {
-              workspace_id: $workspace_id, event_id: row.target_event_id
-            })
-            CREATE (source)-[:RELATED_EVENT {
-              relation_id: row.relation_id,
-              relation_type: row.relation_type,
-              confidence: row.confidence,
-              shared_entities: row.shared_entities
-            }]->(target)
-            """,
-            rows=payload["event_relations"],
-            workspace_id=workspace_id,
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGDocument)
-            SET n = row
-            """,
-            rows=payload["documents"],
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGMention)
-            SET n = row.props
-            WITH n, row
-            OPTIONAL MATCH (e:RagTKGEntity {
-              workspace_id: $workspace_id, entity_id: row.entity_id
-            })
-            OPTIONAL MATCH (a:RagTKGAssertion {
-              workspace_id: $workspace_id, assertion_id: row.assertion_id
-            })
-            OPTIONAL MATCH (v:RagTKGEvent {
-              workspace_id: $workspace_id, event_id: row.event_id
-            })
-            OPTIONAL MATCH (d:RagTKGDocument {
-              workspace_id: $workspace_id, document_id: row.document_id
-            })
-            FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END | CREATE (n)-[:MENTIONS]->(e))
-            FOREACH (_ IN CASE WHEN a IS NULL THEN [] ELSE [1] END | CREATE (n)-[:SUPPORTS]->(a))
-            FOREACH (_ IN CASE WHEN v IS NULL THEN [] ELSE [1] END |
-              CREATE (n)-[:MENTIONS_EVENT]->(v))
-            FOREACH (_ IN CASE WHEN d IS NULL THEN [] ELSE [1] END |
-              CREATE (n)-[:FROM_DOCUMENT]->(d))
-            """,
-            rows=payload["mentions"],
-            workspace_id=workspace_id,
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            MATCH (v:RagTKGEvent {
-              workspace_id: $workspace_id, event_id: row.event_id
-            })
-            MATCH (e:RagTKGEntity {
-              workspace_id: $workspace_id, entity_id: row.entity_id
-            })
-            CREATE (v)-[:HAS_PARTICIPANT {
-              link_id: row.link_id, role: row.role, surface_form: row.surface_form,
-              document_id: row.document_id
-            }]->(e)
-            """,
-            rows=payload["event_links"],
-            workspace_id=workspace_id,
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGEffect)
-            SET n = row.props
-            WITH n, row
-            MERGE (v:RagTKG:RagTKGEvent {
-              workspace_id: $workspace_id, event_id: row.event_id
-            })
-            WITH n, row, v
-            MATCH (a:RagTKGAssertion {
-              workspace_id: $workspace_id, assertion_id: row.assertion_id
-            })
-            CREATE (v)-[:HAS_EFFECT]->(n)-[:AFFECTS]->(a)
-            """,
-            rows=payload["effects"],
-            workspace_id=workspace_id,
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGConflict)
-            SET n = row.props, n.assertion_ids = row.assertion_ids,
-                n.mention_ids = row.mention_ids
-            WITH n, row
-            UNWIND row.assertion_ids AS assertion_id
-            MATCH (a:RagTKGAssertion {
-              workspace_id: $workspace_id, assertion_id: assertion_id
-            })
-            CREATE (n)-[:INVOLVES]->(a)
-            """,
-            rows=payload["conflicts"],
-            workspace_id=workspace_id,
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGDecision)
-            SET n = row.props, n.candidate_entity_ids = row.candidate_entity_ids
-            WITH n, row
-            OPTIONAL MATCH (e:RagTKGEntity {
-              workspace_id: $workspace_id, entity_id: row.selected_entity_id
-            })
-            FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END | CREATE (n)-[:SELECTED]->(e))
-            """,
-            rows=payload["decisions"],
-            workspace_id=workspace_id,
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGReview)
-            SET n = row.props, n.candidate_entity_ids = row.candidate_entity_ids,
-                n.candidate_scores_json = row.candidate_scores_json
-            WITH n, row
-            OPTIONAL MATCH (e:RagTKGEntity {
-              workspace_id: $workspace_id, entity_id: row.provisional_entity_id
-            })
-            FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END | CREATE (n)-[:PROVISIONAL]->(e))
-            """,
-            rows=payload["reviews"],
-            workspace_id=workspace_id,
-        )
-        await tx.run(
-            """
-            UNWIND $rows AS row
-            CREATE (n:RagTKG:RagTKGMerge)
-            SET n = row.props
-            WITH n, row
-            OPTIONAL MATCH (s:RagTKGEntity {
-              workspace_id: $workspace_id, entity_id: row.source_entity_id
-            })
-            OPTIONAL MATCH (t:RagTKGEntity {
-              workspace_id: $workspace_id, entity_id: row.target_entity_id
-            })
-            FOREACH (_ IN CASE WHEN s IS NULL THEN [] ELSE [1] END | CREATE (n)-[:SOURCE]->(s))
-            FOREACH (_ IN CASE WHEN t IS NULL THEN [] ELSE [1] END | CREATE (n)-[:TARGET]->(t))
-            """,
-            rows=payload["merges"],
-            workspace_id=workspace_id,
-        )
+        await result.consume()
 
     async def query(self, request: TKGQueryRequest) -> TKGQueryResponse:
         conditions = [

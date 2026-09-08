@@ -41,14 +41,23 @@ class NeedItem(BaseModel):
     need_id: str = Field(default="", coerce_numbers_to_str=True)
     knowledge_type: KnowledgeType
     status: NeedStatus = "missing"
-    query: str = Field(min_length=1)
+    # Assessment models may leave this blank once a need is satisfied. Parsing
+    # stays permissive; normalize_need_state restores a safe actionable query.
+    query: str = ""
     route: NeedRoute
+    # Initial plans request positive budgets, while a post-retrieval assessment may
+    # legitimately emit zero for an already satisfied need.
+    budget: int | None = Field(default=None, ge=0)
     rationale: str = ""
+    low_level_keywords: list[str] = Field(default_factory=list)
+    high_level_keywords: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
     relations: list[str] = Field(default_factory=list)
     event_types: list[str] = Field(default_factory=list)
     start_time: str | None = None
     end_time: str | None = None
+    state_intents: list[str] = Field(default_factory=list)
+    expand_event_chain: bool = False
     missing_slots: list[str] = Field(default_factory=list)
     supported_evidence_ids: list[str] = Field(default_factory=list)
 
@@ -67,6 +76,18 @@ class NeedItem(BaseModel):
             else:
                 normalized.append(item)
         return normalized
+
+    @field_validator("missing_slots", mode="before")
+    @classmethod
+    def _coerce_missing_slots(cls, value: Any) -> Any:
+        """Accept a slot-to-detail mapping while preserving only declared slot names."""
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            return [str(key) for key in value]
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        return value
 
 
 class EstablishedFinding(BaseModel):

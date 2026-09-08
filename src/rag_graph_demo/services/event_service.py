@@ -7,10 +7,12 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from json_repair import repair_json
 from pydantic import ValidationError
 
 from rag_graph_demo.domain.events import (
     EventCandidate,
+    EventFactCandidate,
     EventMention,
     EventQueryRequest,
     EventQueryResponse,
@@ -24,6 +26,7 @@ from rag_graph_demo.storage.event_registry import EventRegistry
 logger = logging.getLogger(__name__)
 
 VALID_TIME_PRECISIONS = frozenset({"unknown", "year", "month", "day"})
+SUBDAY_TIME_PRECISIONS = frozenset({"hour", "minute", "second"})
 
 
 def normalize_time_precision(value: Any) -> str:
@@ -33,6 +36,10 @@ def normalize_time_precision(value: Any) -> str:
     normalized = str(value).strip().casefold()
     if normalized in VALID_TIME_PRECISIONS:
         return normalized
+    if normalized in SUBDAY_TIME_PRECISIONS:
+        # The event schema stores dates at day granularity.  A sub-day answer is
+        # therefore safely represented as "day" instead of losing all precision.
+        return "day"
     logger.warning(
         "Unsupported event time_precision %r; falling back to 'unknown'",
         value,
@@ -118,17 +125,87 @@ def _extract_json_payload(value: str) -> dict[str, Any]:
     cleaned = value.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start < 0 or end <= start:
-            raise ValueError("Event extractor did not return a JSON object") from None
-        payload = json.loads(cleaned[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("Event extractor JSON root must be an object")
-    return payload
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    candidates = [cleaned]
+    if start >= 0 and end > start:
+        enclosed = cleaned[start : end + 1]
+        if enclosed != cleaned:
+            candidates.append(enclosed)
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if isinstance(payload, dict):
+            return payload
+        last_error = ValueError("Event extractor JSON root must be an object")
+
+    # JSON mode is not an absolute guarantee with OpenAI-compatible endpoints.
+    # Repair only syntax (missing commas/quotes, truncation), then still validate
+    # the resulting object and every event with Pydantic below.
+    for candidate in reversed(candidates):
+        try:
+            payload = repair_json(candidate, return_objects=True)
+        except Exception as exc:  # json-repair deliberately accepts broad input
+            last_error = exc
+            continue
+        if isinstance(payload, dict):
+            return payload
+        last_error = ValueError("Repaired event extractor JSON root is not an object")
+
+    detail = f": {last_error}" if last_error else ""
+    raise ValueError(f"Event extractor did not return a valid JSON object{detail}") from last_error
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None and str(item).strip()]
+
+
+def _repair_event_candidate(value: dict[str, Any]) -> dict[str, Any]:
+    """Normalize common, harmless schema drift without inventing facts."""
+    repaired = dict(value)
+    repaired["time_precision"] = normalize_time_precision(repaired.get("time_precision"))
+    repaired["actors"] = _normalize_string_list(repaired.get("actors"))
+    repaired["objects"] = _normalize_string_list(repaired.get("objects"))
+    if repaired.get("action") is None:
+        repaired["action"] = ""
+    if repaired.get("confidence") is None:
+        repaired["confidence"] = 0.65
+
+    # An incomplete lifecycle triple is optional metadata.  Drop that one effect,
+    # not the otherwise valid event that contains it.
+    valid_effects: list[EventFactCandidate] = []
+    raw_effects = repaired.get("fact_effects") or []
+    if not isinstance(raw_effects, list):
+        raw_effects = []
+    for effect in raw_effects[:3]:
+        if not isinstance(effect, dict):
+            logger.warning("Skipping malformed fact effect: expected an object")
+            continue
+        try:
+            valid_effects.append(EventFactCandidate.model_validate(effect))
+        except ValidationError as exc:
+            logger.warning("Skipping malformed fact effect: %s", exc)
+    repaired["fact_effects"] = valid_effects
+
+    # The prompt asks for complete evidence, while storage has defensive limits.
+    # Truncation is preferable to silently losing the complete event candidate.
+    for field, limit in (("event_type", 100), ("summary", 1_000), ("action", 200)):
+        if isinstance(repaired.get(field), str):
+            repaired[field] = repaired[field][:limit]
+    if isinstance(repaired.get("evidence"), str):
+        repaired["evidence"] = repaired["evidence"][:4_000]
+    return repaired
 
 
 class LLMEventExtractor:
@@ -139,11 +216,13 @@ class LLMEventExtractor:
         chunk_chars: int = 12_000,
         max_events: int = 12,
         max_events_per_part: int = 5,
+        extraction_attempts: int = 2,
     ) -> None:
         self._engine = engine
         self._chunk_chars = chunk_chars
         self._max_events = max_events
         self._max_events_per_part = max_events_per_part
+        self._extraction_attempts = max(1, extraction_attempts)
 
     async def extract(self, title: str, text: str) -> list[EventCandidate]:
         parts = self._split(text)
@@ -154,48 +233,86 @@ class LLMEventExtractor:
             if part_start < 0:
                 part_start = search_offset
             search_offset = part_start + len(part)
-            raw = await self._engine.complete_extraction(
-                EVENT_PROMPT_TEMPLATE.format(
-                    title=title,
-                    part_number=index,
-                    part_count=len(parts),
-                    text=part,
-                ),
-                EVENT_SYSTEM_PROMPT,
+            base_prompt = EVENT_PROMPT_TEMPLATE.format(
+                title=title,
+                part_number=index,
+                part_count=len(parts),
+                text=part,
             )
-            payload = _extract_json_payload(raw)
-            event_values = payload.get("events") or []
-            if not isinstance(event_values, list):
-                raise ValueError("Event extractor 'events' must be an array")
-            valid_before = len(candidates)
-            for value in event_values[: self._max_events_per_part]:
-                if not isinstance(value, dict):
-                    continue
-                repaired = dict(value)
-                repaired["time_precision"] = normalize_time_precision(
-                    repaired.get("time_precision")
-                )
-                if not str(repaired.get("evidence") or "").strip():
-                    repaired["evidence"] = self._source_evidence(part, repaired)
-                try:
-                    candidate = EventCandidate.model_validate(repaired)
-                except ValidationError as exc:
-                    logger.warning("Skipping malformed event candidate: %s", exc)
-                    continue
-                evidence_offset = part.find(candidate.evidence)
-                candidate.source_segment_id = f"event-part-{index}"
-                candidate.source_segment_start = part_start
-                candidate.source_segment_end = part_start + len(part)
-                if evidence_offset >= 0:
-                    candidate.evidence_start = part_start + evidence_offset
-                    candidate.evidence_end = (
-                        candidate.evidence_start + len(candidate.evidence)
+            last_error: Exception | None = None
+            part_candidates: list[EventCandidate] = []
+            for attempt in range(1, self._extraction_attempts + 1):
+                prompt = base_prompt
+                if attempt > 1:
+                    # Change the prompt so a cached malformed response is not reused.
+                    prompt += (
+                        "\n\n上一次响应无法通过 JSON/schema 校验。请重新生成完整 JSON，"
+                        "确保字符串正确转义、字段之间有逗号，缺失的可选事实影响使用空数组。"
                     )
-                candidates.append(candidate)
-                if len(candidates) >= self._max_events:
-                    return candidates
-            if event_values and len(candidates) == valid_before:
-                raise ValueError("All event candidates in a document part were malformed")
+                raw = await self._engine.complete_extraction(prompt, EVENT_SYSTEM_PROMPT)
+                try:
+                    payload = _extract_json_payload(raw)
+                    event_values = payload.get("events") or []
+                    if not isinstance(event_values, list):
+                        raise ValueError("Event extractor 'events' must be an array")
+                    part_candidates = self._validate_candidates(
+                        event_values, part, index, part_start
+                    )
+                    if event_values and not part_candidates:
+                        raise ValueError("All event candidates in a document part were malformed")
+                    last_error = None
+                    break
+                except (ValueError, ValidationError) as exc:
+                    last_error = exc
+                    if attempt >= self._extraction_attempts:
+                        break
+                    logger.warning(
+                        "Event extraction validation failed for part %d/%d; "
+                        "retrying (%d/%d): %s; raw prefix=%r",
+                        index,
+                        len(parts),
+                        attempt,
+                        self._extraction_attempts,
+                        exc,
+                        raw[:500],
+                    )
+            if last_error is not None:
+                raise ValueError(
+                    f"Event extraction failed after {self._extraction_attempts} attempt(s) "
+                    f"for part {index}/{len(parts)}: {last_error}"
+                ) from last_error
+            candidates.extend(part_candidates)
+            if len(candidates) >= self._max_events:
+                return candidates[: self._max_events]
+        return candidates
+
+    def _validate_candidates(
+        self,
+        event_values: list[Any],
+        part: str,
+        part_number: int,
+        part_start: int,
+    ) -> list[EventCandidate]:
+        candidates: list[EventCandidate] = []
+        for value in event_values[: self._max_events_per_part]:
+            if not isinstance(value, dict):
+                continue
+            repaired = _repair_event_candidate(value)
+            if not str(repaired.get("evidence") or "").strip():
+                repaired["evidence"] = self._source_evidence(part, repaired)
+            try:
+                candidate = EventCandidate.model_validate(repaired)
+            except ValidationError as exc:
+                logger.warning("Skipping malformed event candidate: %s", exc)
+                continue
+            evidence_offset = part.find(candidate.evidence)
+            candidate.source_segment_id = f"event-part-{part_number}"
+            candidate.source_segment_start = part_start
+            candidate.source_segment_end = part_start + len(part)
+            if evidence_offset >= 0:
+                candidate.evidence_start = part_start + evidence_offset
+                candidate.evidence_end = candidate.evidence_start + len(candidate.evidence)
+            candidates.append(candidate)
         return candidates
 
     @staticmethod
@@ -203,9 +320,7 @@ class LLMEventExtractor:
         """Select an exact source sentence when the model omits evidence."""
         visible = re.sub(r"<!--.*?-->", "", part, flags=re.DOTALL).strip()
         sentences = [
-            item.strip()
-            for item in re.split(r"(?<=[。！？.!?])\s+|\n+", visible)
-            if item.strip()
+            item.strip() for item in re.split(r"(?<=[。！？.!?])\s+|\n+", visible) if item.strip()
         ]
         if not sentences:
             if not visible:
@@ -285,9 +400,7 @@ class EventService:
             )
             for item in candidates
         ]
-        return await self._registry.replace_document_events(
-            document_id, document_title, candidates
-        )
+        return await self._registry.replace_document_events(document_id, document_title, candidates)
 
     async def delete_document(self, document_id: str) -> None:
         await self._registry.delete_document(document_id)
@@ -322,9 +435,7 @@ class EventService:
         )
         query_terms = self._terms(" ".join((request.question, request.entity or "")))
         type_hints = {_normal(item) for item in request.event_types if item.strip()}
-        inferred_entity_events = self._events_matching_question_entities(
-            request.question, events
-        )
+        inferred_entity_events = self._events_matching_question_entities(request.question, events)
         mentions_by_event: dict[str, list[EventMention]] = {}
         for mention in mentions:
             mentions_by_event.setdefault(mention.event_id, []).append(mention)
@@ -365,9 +476,7 @@ class EventService:
             event_entities = [_normal(item) for item in event.actors + event.objects]
             if request.entity:
                 hard_entity = _normal(request.entity)
-                if not any(
-                    hard_entity in item or item in hard_entity for item in event_entities
-                ):
+                if not any(hard_entity in item or item in hard_entity for item in event_entities):
                     continue
             entity_hints = [_normal(item) for item in request.entities if _normal(item)]
             matched_entity_hints = sum(
@@ -428,13 +537,9 @@ class EventService:
                         "temporal_score": 1.0
                         if (start_time or end_time) and event_time
                         else (0.25 if event_time else 0.0),
-                        "state_score": 1.0
-                        if state_intent and has_state_signal
-                        else 0.0,
+                        "state_score": 1.0 if state_intent and has_state_signal else 0.0,
                         "confidence_score": event.confidence,
-                        "source_score": min(
-                            1.0, len(event.source_document_ids) / 2
-                        ),
+                        "source_score": min(1.0, len(event.source_document_ids) / 2),
                     },
                 )
             )
@@ -484,17 +589,13 @@ class EventService:
             for rank, (score, event, signals) in enumerate(ranked, start=1)
         ]
         selected_ids = {item.event_id for item in selected}
-        selected_mentions = [
-            item for item in mentions if item.event_id in selected_ids
-        ]
+        selected_mentions = [item for item in mentions if item.event_id in selected_ids]
         selected_relations = [
             item
             for item in relations
             if item.source_event_id in selected_ids and item.target_event_id in selected_ids
         ]
-        selected_conflicts = [
-            item for item in conflicts if item.event_id in selected_ids
-        ]
+        selected_conflicts = [item for item in conflicts if item.event_id in selected_ids]
         if request.sort_by == "time":
             selected.sort(key=lambda item: (item.start_time or "9999", item.event_id))
         return EventQueryResponse(
@@ -514,9 +615,7 @@ class EventService:
         if not result.events:
             return "", result
         evidence = event_evidence_labels(result)
-        labels_by_document = {
-            mention.document_id: label for label, mention in evidence
-        }
+        labels_by_document = {mention.document_id: label for label, mention in evidence}
         mentions_by_event: dict[str, list[EventMention]] = {}
         for mention in result.mentions:
             mentions_by_event.setdefault(mention.event_id, []).append(mention)
@@ -584,9 +683,7 @@ class EventService:
         return words
 
     @staticmethod
-    def _events_matching_question_entities(
-        question: str, events: list[EventRecord]
-    ) -> set[str]:
+    def _events_matching_question_entities(question: str, events: list[EventRecord]) -> set[str]:
         question_normal = _normal(question)
         question_tokens = set(re.findall(r"[a-z][a-z0-9_-]+", question.casefold()))
         generic_entity_tokens = {
@@ -628,8 +725,16 @@ class EventService:
         recent = re.search(r"(?:近|过去)([一二三四五六七八九十\d]+)年", question)
         if recent:
             chinese_numbers = {
-                "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-                "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+                "一": 1,
+                "二": 2,
+                "三": 3,
+                "四": 4,
+                "五": 5,
+                "六": 6,
+                "七": 7,
+                "八": 8,
+                "九": 9,
+                "十": 10,
             }
             token = recent.group(1)
             years_back = int(token) if token.isdigit() else chinese_numbers.get(token, 3)

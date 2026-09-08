@@ -133,6 +133,66 @@ def test_three_path_fusion_preserves_one_traceable_passage_per_path() -> None:
     assert result[0].score == pytest.approx(3 / 61)
 
 
+def test_evolink_candidates_contribute_one_bounded_bonus() -> None:
+    candidates = {
+        "vector": [
+            EvidenceCandidate(
+                evidence_id="vector:base",
+                channel="vector",
+                rank=1,
+                document_id="doc-base",
+                chunk_id="base-vector",
+                text="base vector",
+            ),
+            EvidenceCandidate(
+                evidence_id="vector:linked",
+                channel="vector",
+                rank=5,
+                document_id="doc-linked",
+                chunk_id="linked-vector",
+                text="linked vector",
+            ),
+        ],
+        "graph": [
+            EvidenceCandidate(
+                evidence_id="graph:base",
+                channel="graph",
+                rank=1,
+                document_id="doc-base",
+                chunk_id="base-graph",
+                text="base graph",
+            ),
+            EvidenceCandidate(
+                evidence_id="graph:linked",
+                channel="graph",
+                rank=1,
+                document_id="doc-linked",
+                chunk_id="linked-graph",
+                text="linked graph",
+                metadata={"linked_by": "ours_evolink"},
+            ),
+        ],
+        "event": [
+            EvidenceCandidate(
+                evidence_id="event:linked",
+                channel="event",
+                rank=2,
+                document_id="doc-linked",
+                chunk_id="linked-event",
+                text="linked event",
+                metadata={"linked_by": "ours_evolink"},
+            )
+        ],
+    }
+
+    result = fuse_evidence(candidates, top_k=2, linked_candidate_weight=0.1)
+
+    assert result[0].document_id == "doc-base"
+    linked = next(item for item in result if item.document_id == "doc-linked")
+    assert linked.score == pytest.approx(1 / 65 + 0.1 / 61)
+    assert linked.channels == ("vector", "graph", "event")
+
+
 @pytest.mark.asyncio
 async def test_event_vector_index_embeds_canonical_events_and_reuses_cache(tmp_path) -> None:
     contexts: list[str] = []
@@ -270,7 +330,7 @@ class FakeRetrievalEngine:
 
 class FakeEventVector:
     async def search(self, _question, _events, *, limit):
-        assert limit == 6
+        assert limit == 2
         return [("evt-1", 0.9)]
 
 

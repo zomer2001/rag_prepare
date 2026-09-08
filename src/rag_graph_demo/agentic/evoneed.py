@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import replace
-from typing import Any, Protocol, TypedDict
+from typing import Any, Literal, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -22,13 +21,18 @@ from rag_graph_demo.evaluation.models import RetrievedChunk
 class EvoNeedRetriever(Protocol):
     async def __call__(
         self,
-        need: NeedItem,
-        top_k: int,
-    ) -> list[RetrievedChunk]: ...
+        needs: list[NeedItem],
+        budgets: list[int],
+    ) -> list[list[RetrievedChunk]]: ...
 
 
 class EvoNeedModel(Protocol):
-    async def plan_needs(self, question: str) -> ModelCall[KnowledgeNeedState]: ...
+    async def plan_needs(
+        self,
+        question: str,
+        *,
+        total_budget: int,
+    ) -> ModelCall[KnowledgeNeedState]: ...
 
     async def assess_needs(
         self,
@@ -50,6 +54,7 @@ class EvoNeedModel(Protocol):
 class EvoNeedState(TypedDict, total=False):
     question: str
     top_k: int
+    retrieval_budget: int
     context_k: int
     max_retrieval_rounds: int
     rrf_k: int
@@ -62,14 +67,39 @@ class EvoNeedState(TypedDict, total=False):
     llm_calls: int
     input_tokens: int
     output_tokens: int
+    retrieval_only: bool
 
 
 class EvoNeedRAGGraph:
     """Training-free typed-gap planning over selective EvoLink retrieval actions."""
 
-    def __init__(self, retriever: EvoNeedRetriever, model: EvoNeedModel) -> None:
+    def __init__(
+        self,
+        retriever: EvoNeedRetriever,
+        model: EvoNeedModel,
+        *,
+        initial_retrieval: Literal["question_anchor", "planned_needs"] = "question_anchor",
+        route_budget_mode: Literal[
+            "per_action", "shared_total", "equal_total", "planned_total"
+        ] = "per_action",
+        minimum_route_budget: int = 1,
+    ) -> None:
+        if initial_retrieval not in {"question_anchor", "planned_needs"}:
+            raise ValueError(f"Unsupported initial retrieval mode: {initial_retrieval}")
+        if route_budget_mode not in {
+            "per_action",
+            "shared_total",
+            "equal_total",
+            "planned_total",
+        }:
+            raise ValueError(f"Unsupported route budget mode: {route_budget_mode}")
+        if minimum_route_budget < 1:
+            raise ValueError("minimum_route_budget must be positive")
         self.retriever = retriever
         self.model = model
+        self.initial_retrieval = initial_retrieval
+        self.route_budget_mode = route_budget_mode
+        self.minimum_route_budget = minimum_route_budget
         builder = StateGraph(EvoNeedState)
         builder.add_node("plan", self._plan)
         builder.add_node("retrieve", self._retrieve)
@@ -77,7 +107,11 @@ class EvoNeedRAGGraph:
         builder.add_node("answer", self._answer)
         builder.add_edge(START, "plan")
         builder.add_edge("plan", "retrieve")
-        builder.add_edge("retrieve", "assess")
+        builder.add_conditional_edges(
+            "retrieve",
+            self._route_after_retrieval,
+            {"assess": "assess", "end": END},
+        )
         builder.add_conditional_edges(
             "assess",
             self._route_after_assessment,
@@ -94,11 +128,14 @@ class EvoNeedRAGGraph:
         context_k: int,
         max_retrieval_rounds: int,
         rrf_k: int,
+        retrieval_budget: int | None = None,
+        retrieval_only: bool = False,
     ) -> AgenticRun:
         state = await self.compiled.ainvoke(
             {
                 "question": question,
                 "top_k": top_k,
+                "retrieval_budget": retrieval_budget or top_k,
                 "context_k": context_k,
                 "max_retrieval_rounds": max_retrieval_rounds,
                 "rrf_k": rrf_k,
@@ -109,9 +146,14 @@ class EvoNeedRAGGraph:
                 "llm_calls": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
+                "retrieval_only": retrieval_only,
             }
         )
-        answer = state["answer"]
+        answer = state.get("answer") or GroundedAnswer(
+            answer="",
+            citations=[],
+            insufficient_evidence=False,
+        )
         return AgenticRun(
             question=question,
             answer=answer.answer,
@@ -125,8 +167,15 @@ class EvoNeedRAGGraph:
             insufficient_evidence=answer.insufficient_evidence,
         )
 
+    @staticmethod
+    def _route_after_retrieval(state: EvoNeedState) -> str:
+        return "end" if state.get("retrieval_only", False) else "assess"
+
     async def _plan(self, state: EvoNeedState) -> dict[str, Any]:
-        call = await self.model.plan_needs(state["question"])
+        call = await self.model.plan_needs(
+            state["question"],
+            total_budget=state["retrieval_budget"],
+        )
         need_state = normalize_need_state(
             call.value,
             question=state["question"],
@@ -146,7 +195,10 @@ class EvoNeedRAGGraph:
         }
 
     async def _retrieve(self, state: EvoNeedState) -> dict[str, Any]:
-        if state["retrieval_round"] == 0:
+        if (
+            state["retrieval_round"] == 0
+            and self.initial_retrieval == "question_anchor"
+        ):
             open_needs = [
                 NeedItem(
                     need_id="need_question_anchor",
@@ -160,6 +212,9 @@ class EvoNeedRAGGraph:
                 )
             ]
         else:
+            # In planned-needs mode, the first acquisition executes the
+            # planner's route-specific subqueries. All actions still run in
+            # parallel below and therefore count as one retrieval round.
             open_needs = [
                 item
                 for item in state["need_state"].needs
@@ -175,13 +230,34 @@ class EvoNeedRAGGraph:
                     rationale="Fallback grounding search when no open need was emitted.",
                 )
             ]
-        budgets = allocate_route_budgets(state["top_k"], len(open_needs))
-        results = await asyncio.gather(
-            *(
-                self.retriever(need, budget)
-                for need, budget in zip(open_needs, budgets, strict=True)
-            )
+        if self.route_budget_mode in {"shared_total", "equal_total", "planned_total"}:
+            # Every route receives at least one slot without exceeding the
+            # query-level acquisition budget.
+            open_needs = open_needs[: max(1, state["retrieval_budget"])]
+        shared_total = self.route_budget_mode in {
+            "shared_total",
+            "equal_total",
+            "planned_total",
+        }
+        planned_budgets = (
+            None
+            if self.route_budget_mode == "equal_total"
+            else [item.budget for item in open_needs]
         )
+        budgets = allocate_route_budgets(
+            state["retrieval_budget"],
+            len(open_needs),
+            shared_total=shared_total,
+            planned_budgets=planned_budgets,
+            minimum_per_action=(
+                self.minimum_route_budget
+                if self.route_budget_mode in {"shared_total", "planned_total"}
+                else 1
+            ),
+        )
+        results = await self.retriever(open_needs, budgets)
+        if len(results) != len(open_needs):
+            raise RuntimeError("EvoNeed retriever returned the wrong number of action batches")
         retrieval_round = state["retrieval_round"] + 1
         action_batches: list[list[RetrievedChunk]] = []
         round_result_count = 0
@@ -193,6 +269,7 @@ class EvoNeedRAGGraph:
                     "knowledge_type": need.knowledge_type,
                     "route": need.route,
                     "query": need.query,
+                    "planned_budget": need.budget,
                     "budget": budget,
                     "result_count": len(values),
                 }
@@ -235,6 +312,9 @@ class EvoNeedRAGGraph:
                 {
                     "node": "retrieve_needs",
                     "round": retrieval_round,
+                    "initial_retrieval": self.initial_retrieval,
+                    "route_budget_mode": self.route_budget_mode,
+                    "total_candidate_budget": sum(budgets),
                     "actions": actions,
                     "result_count": round_result_count,
                     "evidence_ids": [evidence_id(item) for item in evidence],
@@ -327,8 +407,41 @@ class EvoNeedRAGGraph:
         }
 
 
-def allocate_route_budgets(top_k: int, action_count: int) -> list[int]:
+def allocate_route_budgets(
+    top_k: int,
+    action_count: int,
+    *,
+    shared_total: bool = False,
+    planned_budgets: list[int | None] | None = None,
+    minimum_per_action: int = 1,
+) -> list[int]:
     action_count = max(1, action_count)
+    if shared_total:
+        minimum_per_action = max(1, minimum_per_action)
+        if action_count * minimum_per_action > top_k:
+            raise ValueError(
+                "shared route budget requires total >= actions * minimum"
+            )
+        if planned_budgets is None:
+            planned_budgets = [1] * action_count
+        if len(planned_budgets) != action_count:
+            raise ValueError("planned budget count must match action count")
+        weights = [max(1, int(value or 1)) for value in planned_budgets]
+        if sum(weights) == top_k and all(
+            value >= minimum_per_action for value in weights
+        ):
+            return weights
+        remaining = top_k - action_count * minimum_per_action
+        raw = [remaining * weight / sum(weights) for weight in weights]
+        budgets = [minimum_per_action + int(value) for value in raw]
+        missing = top_k - sum(budgets)
+        order = sorted(
+            range(action_count),
+            key=lambda index: (-(raw[index] - int(raw[index])), index),
+        )
+        for index in order[:missing]:
+            budgets[index] += 1
+        return budgets
     return [max(1, top_k)] * action_count
 
 
@@ -345,6 +458,11 @@ def normalize_need_state(
         "relation_evidence": "graph",
         "evolution_evidence": "event",
     }
+    previous_by_id = (
+        {item.need_id.casefold(): item for item in previous_state.needs}
+        if previous_state is not None
+        else {}
+    )
     needs: list[NeedItem] = []
     seen: set[str] = set()
     for index, item in enumerate(value.needs[:6], start=1):
@@ -361,15 +479,44 @@ def normalize_need_state(
         status = "missing" if initial else item.status
         if status == "satisfied" and not supported:
             status = "partial"
+        previous = previous_by_id.get(need_id.casefold())
+        query = item.query.strip()
+        if not query:
+            query = (
+                previous.query.strip()
+                if previous is not None and previous.query.strip()
+                else question
+            )
         needs.append(
             item.model_copy(
                 update={
                     "need_id": need_id,
+                    "query": query,
                     "route": route_by_type[item.knowledge_type],
                     "status": status,
+                    "budget": item.budget or (previous.budget if previous else None),
+                    "low_level_keywords": list(
+                        dict.fromkeys(item.low_level_keywords)
+                    )[:12],
+                    "high_level_keywords": list(
+                        dict.fromkeys(item.high_level_keywords)
+                    )[:12],
                     "entities": list(dict.fromkeys(item.entities))[:6],
                     "relations": list(dict.fromkeys(item.relations))[:6],
                     "event_types": list(dict.fromkeys(item.event_types))[:6],
+                    "state_intents": [
+                        intent
+                        for intent in dict.fromkeys(item.state_intents)
+                        if intent
+                        in {
+                            "latest",
+                            "change",
+                            "conflict",
+                            "denial",
+                            "correction",
+                            "replacement",
+                        }
+                    ][:6],
                     "missing_slots": list(dict.fromkeys(item.missing_slots))[:6],
                     "supported_evidence_ids": supported,
                 }
@@ -383,8 +530,13 @@ def normalize_need_state(
             needs[-1] = evolution_need
         else:
             needs.append(evolution_need)
+    if initial:
+        # The controlled experiment permits at most one action per retrieval route.
+        unique_routes: dict[str, NeedItem] = {}
+        for item in needs:
+            unique_routes.setdefault(item.route, item)
+        needs = list(unique_routes.values())[:3]
     if previous_state is not None:
-        previous_by_id = {item.need_id.casefold(): item for item in previous_state.needs}
         needs = [
             _progress_repeated_query(item, previous_by_id.get(item.need_id.casefold()), question)
             for item in needs

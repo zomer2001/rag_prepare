@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     llm_max_concurrency: int = Field(default=4, ge=1, le=16)
     agentic_max_retrieval_rounds: int = Field(default=2, ge=1, le=5)
     agentic_rrf_k: int = Field(default=60, ge=1)
+    evoneed_retrieval_budget: int = Field(default=60, ge=1, le=300)
+    evoneed_min_route_budget: int = Field(default=5, ge=1, le=100)
 
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_model_id: str = "Qwen/Qwen3-Embedding-0.6B"
@@ -101,6 +103,11 @@ class Settings(BaseSettings):
     entity_resolution_embedding_threshold: float = Field(default=0.72, ge=0, le=1)
     entity_resolution_auto_match_threshold: float = Field(default=0.94, ge=0, le=1)
     entity_resolution_llm_threshold: float = Field(default=0.78, ge=0, le=1)
+    evolink_seed_limit_per_name: int = Field(default=3, ge=1, le=20)
+    evolink_max_entity_names: int = Field(default=8, ge=1, le=20)
+    evolink_max_event_seeds: int = Field(default=5, ge=1, le=50)
+    evolink_expansion_limit: int = Field(default=20, ge=1, le=100)
+    evolink_link_weight: float = Field(default=0.1, ge=0, le=1)
 
     @field_validator("tkg_registry_path", mode="before")
     @classmethod

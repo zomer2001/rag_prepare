@@ -334,8 +334,64 @@ async def test_out_of_order_events_are_applied_in_effective_time_order(tmp_path)
     facts = sorted(snapshot.assertions, key=lambda item: item.valid_from or "")
 
     assert len(facts) == 2
-    assert facts[0].valid_from == facts[0].valid_to == "2023-10-29T02:00"
+    assert facts[0].valid_from is None
+    assert facts[0].valid_to == "2023-10-29T02:00"
     assert facts[0].status == AssertionStatus.INACTIVE
     assert facts[1].valid_from == "2024-03-31"
     assert facts[1].valid_to is None
     assert facts[1].status == AssertionStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_termination_with_coarse_end_does_not_infer_a_later_start(tmp_path) -> None:
+    registry, service = build_service(tmp_path)
+    event = EventRecord(
+        event_id="evt-termination",
+        canonical_key="termination",
+        event_type="解雇",
+        summary="Joe Natale was removed as CEO in October 2021.",
+        start_time="2021-10",
+        fact_effects=[
+            EventFactCandidate(
+                subject="Joe Natale",
+                predicate="servesAs",
+                object="CEO",
+                effect_type=EventEffectType.TERMINATES,
+                valid_to="2021",
+            )
+        ],
+    )
+
+    await service.index_document("doc-1", "Removal", SemanticExtractionBatch(), [event])
+    snapshot = await registry.snapshot()
+
+    assert snapshot.assertions[0].valid_from is None
+    assert snapshot.assertions[0].valid_to == "2021-10"
+    assert snapshot.assertions[0].status == AssertionStatus.INACTIVE
+
+
+@pytest.mark.asyncio
+async def test_retrospective_confirmation_keeps_historical_interval(tmp_path) -> None:
+    registry, service = build_service(tmp_path)
+    event = EventRecord(
+        event_id="evt-testimony",
+        canonical_key="testimony",
+        event_type="作证",
+        summary="A 2023 testimony confirmed a fact that ended in 2022.",
+        start_time="2023-10-05",
+        fact_effects=[
+            EventFactCandidate(
+                subject="Alameda Research",
+                predicate="hasPermission",
+                object="FTX platform",
+                effect_type=EventEffectType.CONFIRMS,
+                valid_to="2022-11",
+            )
+        ],
+    )
+
+    await service.index_document("doc-1", "Testimony", SemanticExtractionBatch(), [event])
+    snapshot = await registry.snapshot()
+
+    assert snapshot.assertions[0].valid_from is None
+    assert snapshot.assertions[0].valid_to == "2022-11"

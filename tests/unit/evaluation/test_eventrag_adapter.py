@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
+
+import pytest
 
 
 def load_adapter() -> ModuleType:
@@ -96,3 +99,89 @@ def test_truncate_extraction_response_keeps_first_records() -> None:
     assert '"E3"' not in result
     assert result.count('"relationship"') == 1
     assert result.endswith("<|COMPLETE|>")
+
+
+@pytest.mark.asyncio
+async def test_extraction_response_is_reused_after_restart(tmp_path: Path) -> None:
+    module = load_adapter()
+    cache_path = tmp_path / "extraction_response_cache.jsonl"
+
+    def make_clients():
+        return module.ModelClients(
+            deepseek_key="test-key",
+            deepseek_base_url="https://example.invalid",
+            deepseek_model="test-model",
+            zhipu_key="test-key",
+            zhipu_base_url="https://example.invalid",
+            zhipu_model="test-embedding",
+            dimensions=8,
+            llm_concurrency=1,
+            embedding_concurrency=1,
+            extraction_max_tokens=100,
+            max_entities_per_chunk=2,
+            max_relationships_per_chunk=1,
+            extraction_cache_path=cache_path,
+        )
+
+    first = make_clients()
+    api_calls = 0
+
+    async def create_response(**_kwargs):
+        nonlocal api_calls
+        api_calls += 1
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content='("entity"<|>"E1"<|>"Event"<|>"one")<|COMPLETE|>'
+                    )
+                )
+            ]
+        )
+
+    first._deepseek.chat.completions.create = create_response
+    prompt = "-Budgeted Baseline Rules-\nExtract this chunk."
+    expected = await first.complete(prompt)
+
+    restarted = make_clients()
+
+    async def unexpected_api_call(**_kwargs):
+        raise AssertionError("cached extraction should not call the API")
+
+    restarted._deepseek.chat.completions.create = unexpected_api_call
+    actual = await restarted.complete(prompt)
+
+    assert api_calls == 1
+    assert actual == expected
+    assert len(cache_path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_response_cache_ignores_partial_final_record(tmp_path: Path) -> None:
+    module = load_adapter()
+    cache_path = tmp_path / "cache.jsonl"
+    cache_path.write_text(
+        '{"key": "complete", "content": "saved"}\n{"key": "partial"',
+        encoding="utf-8",
+    )
+
+    assert module.load_response_cache(cache_path) == {"complete": "saved"}
+
+
+def test_completed_index_manifest_allows_only_explicit_query_change(tmp_path: Path) -> None:
+    module = load_adapter()
+    path = tmp_path / "adapter_manifest.json"
+    original = {"corpus_sha256": "same", "query_sha256": "q100", "queries": 100}
+    path.write_text(json.dumps(original), encoding="utf-8")
+    (tmp_path / "index_complete.json").write_text("{}", encoding="utf-8")
+    gold500 = {**original, "query_sha256": "q500", "queries": 500}
+
+    with pytest.raises(RuntimeError):
+        module.write_or_validate_manifest(path, gold500)
+    module.write_or_validate_manifest(path, gold500, allow_query_set_change=True)
+
+    with pytest.raises(RuntimeError):
+        module.write_or_validate_manifest(
+            path,
+            {**gold500, "corpus_sha256": "different"},
+            allow_query_set_change=True,
+        )

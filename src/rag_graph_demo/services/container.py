@@ -137,6 +137,11 @@ class AppContainer:
                 if settings.tkg_enabled and self.neo4j_store is not None
                 else None
             ),
+            evolink_seed_limit_per_name=settings.evolink_seed_limit_per_name,
+            evolink_max_entity_names=settings.evolink_max_entity_names,
+            evolink_max_event_seeds=settings.evolink_max_event_seeds,
+            evolink_expansion_limit=settings.evolink_expansion_limit,
+            evolink_link_weight=settings.evolink_link_weight,
         )
         self.document_service = DocumentService(
             self.file_store,

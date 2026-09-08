@@ -144,15 +144,32 @@ def upstream_revision(hipporag_root: Path) -> str:
         return "unknown"
 
 
-def write_or_validate_manifest(path: Path, expected: dict[str, Any]) -> None:
+QUERY_MANIFEST_KEYS = frozenset({"query_sha256", "queries"})
+
+
+def write_or_validate_manifest(
+    path: Path,
+    expected: dict[str, Any],
+    *,
+    allow_query_set_change: bool = False,
+) -> None:
     if path.is_file():
         existing = json.loads(path.read_text(encoding="utf-8"))
-        if existing != expected:
-            raise RuntimeError(
-                f"Runtime manifest differs from this run: {path}. "
-                "Use a new --runtime-dir for a different corpus or model configuration."
-            )
-        return
+        if existing == expected:
+            return
+        if allow_query_set_change:
+            existing_index = {
+                key: value for key, value in existing.items() if key not in QUERY_MANIFEST_KEYS
+            }
+            expected_index = {
+                key: value for key, value in expected.items() if key not in QUERY_MANIFEST_KEYS
+            }
+            if existing_index == expected_index:
+                return
+        raise RuntimeError(
+            f"Runtime manifest differs from this run: {path}. "
+            "Use a new --runtime-dir for a different corpus or model configuration."
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(expected, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -209,11 +226,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding-dimensions", type=int)
     parser.add_argument("--embedding-batch-size", type=int, default=8)
     parser.add_argument("--llm-concurrency", type=int, default=4)
+    parser.add_argument(
+        "--allow-query-set-change",
+        action="store_true",
+        help="For retrieve only, reuse an index when only query hash/count changes.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.allow_query_set_change and args.stage != "retrieve":
+        raise ValueError("--allow-query-set-change is only valid with --stage retrieve")
     load_dotenv(args.env_file.resolve())
 
     deepseek_key = os.getenv("DEEPSEEK_API_KEY")
@@ -263,7 +287,11 @@ def main() -> int:
         "deepseek_thinking": "disabled",
         "top_k": args.top_k,
     }
-    write_or_validate_manifest(runtime_dir / "adapter_manifest.json", manifest)
+    write_or_validate_manifest(
+        runtime_dir / "adapter_manifest.json",
+        manifest,
+        allow_query_set_change=args.allow_query_set_change,
+    )
 
     if args.stage == "doctor":
         print(json.dumps({**manifest, "deepseek_key": "set", "zhipu_key": "set"}, indent=2))

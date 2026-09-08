@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -109,21 +111,23 @@ class EntityResolutionService:
     ) -> list[EntityResolutionProposal]:
         proposals: list[EntityResolutionProposal | None] = [None] * len(candidates)
         unresolved: list[tuple[int, SemanticEntityCandidate, str, list[EntityRecord]]] = []
+        active_entities = [item for item in snapshot.entities if item.status == "active"]
+        active_by_type: dict[str, list[EntityRecord]] = defaultdict(list)
+        exact_by_name: dict[str, list[EntityRecord]] = defaultdict(list)
+        exact_by_type: dict[tuple[str, str], list[EntityRecord]] = defaultdict(list)
+        for entity in active_entities:
+            active_by_type[entity.entity_type].append(entity)
+            for name in [entity.canonical_name, *entity.aliases]:
+                exact_by_name[normalize_name(name)].append(entity)
+                exact_by_type[
+                    (entity.entity_type, identity_signature(name, entity.entity_type))
+                ].append(entity)
         for index, candidate in enumerate(candidates):
             entity_type = self._type_mapper.normalize(candidate.entity_type)
             if not self._enforce_type:
                 entity_type = self._open_type(candidate.entity_type)
             elif entity_type is None:
-                exact_any_type = [
-                    item
-                    for item in snapshot.entities
-                    if item.status == "active"
-                    and normalize_name(candidate.name)
-                    in {
-                        normalize_name(item.canonical_name),
-                        *(normalize_name(alias) for alias in item.aliases),
-                    }
-                ]
+                exact_any_type = exact_by_name.get(normalize_name(candidate.name), [])
                 if len(exact_any_type) == 1:
                     entity_type = exact_any_type[0].entity_type
                 else:
@@ -139,24 +143,29 @@ class EntityResolutionService:
                         decided_by="ontology",
                     )
                     continue
-            same_type = [
-                item
-                for item in snapshot.entities
-                if item.status == "active"
-                and (
-                    not self._enforce_type
-                    or item.entity_type == entity_type
+            same_type = (
+                active_by_type.get(entity_type, [])
+                if self._enforce_type
+                else active_entities
+            )
+            if self._enforce_type:
+                exact = exact_by_type.get(
+                    (entity_type, identity_signature(candidate.name, entity_type)), []
                 )
-            ]
-            exact = [
-                item
-                for item in same_type
-                if identity_signature(candidate.name, entity_type)
-                in {
-                    identity_signature(item.canonical_name, item.entity_type),
-                    *(identity_signature(alias, item.entity_type) for alias in item.aliases),
-                }
-            ]
+            else:
+                signature = identity_signature(candidate.name, entity_type)
+                exact = [
+                    item
+                    for item in same_type
+                    if signature
+                    in {
+                        identity_signature(item.canonical_name, item.entity_type),
+                        *(
+                            identity_signature(alias, item.entity_type)
+                            for alias in item.aliases
+                        ),
+                    }
+                ]
             if len(exact) == 1:
                 proposals[index] = EntityResolutionProposal(
                     candidate_key=self._key(candidate),
@@ -203,8 +212,16 @@ class EntityResolutionService:
             else:
                 unresolved.append((index, candidate, entity_type, same_type))
 
-        for index, candidate, entity_type, same_type in unresolved:
-            proposals[index] = await self._resolve_semantic(candidate, entity_type, same_type)
+        resolved_unmatched = await asyncio.gather(
+            *(
+                self._resolve_semantic(candidate, entity_type, same_type)
+                for _, candidate, entity_type, same_type in unresolved
+            )
+        )
+        for (index, _, _, _), proposal in zip(
+            unresolved, resolved_unmatched, strict=True
+        ):
+            proposals[index] = proposal
         return [item for item in proposals if item is not None]
 
     @staticmethod

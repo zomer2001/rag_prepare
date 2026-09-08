@@ -4,12 +4,15 @@
 
 ## 启动服务
 
-现有 Qdrant 继续由主 compose 提供；EventRAG 使用独立 Neo4j，避免和项目知识图谱混用。
+现有 Qdrant 继续由主 compose 提供；EventRAG 使用独立 Neo4j，避免和项目知识图谱混用。正式
+full609 运行还应通过 compose 环境变量指定新的容器名、端口和数据目录，不能复用 n30 数据卷。
 
 ```bash
 docker-compose up -d qdrant
 docker-compose -f docker-compose.eventrag.yml up -d eventrag-neo4j
 ```
+
+full609 隔离配置见 `docs/full100_baseline_runbook.md`。
 
 默认地址为 Qdrant `http://127.0.0.1:6333`、EventRAG Neo4j `bolt://127.0.0.1:7688`。
 

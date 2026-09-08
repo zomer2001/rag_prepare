@@ -5,7 +5,7 @@ import hashlib
 from rag_graph_demo.evaluation.models import RetrievedChunk
 
 AGENTIC_PROMPT_PROFILE_VERSION = "agentic_retrieval_variants_v2"
-EVONEED_PROMPT_PROFILE_VERSION = "ours_evoneed_v2"
+EVONEED_PROMPT_PROFILE_VERSION = "ours_evoneed_v3_joint_plan_fixed_budget"
 
 EVIDENCE_ASSESSMENT_SYSTEM = (
     "You are the evidence controller in an agentic RAG system. Judge only the supplied "
@@ -34,9 +34,10 @@ system. Decompose the question into evidence needs; do not answer it and do not 
 unstated facts. Return one JSON object with analytic_goal, sufficient=false, needs,
 established_findings=[], conflicts=[], and stop_reason="".
 
-Each need has: need_id, knowledge_type, status="missing", query, route, rationale,
-entities, relations, event_types, start_time, end_time, missing_slots, and
-supported_evidence_ids=[]. Use only these mappings:
+Each need has: need_id, knowledge_type, status="missing", query, route, budget, rationale,
+low_level_keywords, high_level_keywords, entities, relations, event_types, start_time,
+end_time, state_intents, expand_event_chain, missing_slots, and supported_evidence_ids=[].
+Use only these mappings:
 - text_evidence -> vector: exact wording, numbers, conditions, quotations, or source text.
 - relation_evidence -> graph: entities, predicates, bridge relations, and multi-hop links.
 - evolution_evidence -> event: how an entity or relation changes through time.
@@ -48,7 +49,15 @@ group multiple source-text anchors into one text_evidence need when possible. If
 question asks whether a state, relation, focus, stance, or portrayal changed or
 remained consistent across time, always include one evolution_evidence need. Every
 query must preserve the named entities, dates, sources, and constraints relevant to
-that need. Return JSON only."""
+that need. low_level_keywords contain concrete names and identifiers;
+high_level_keywords contain relations, actions, and themes. state_intents may contain
+only latest, change, conflict, denial, correction, or replacement. Set
+expand_event_chain=true only for temporal order, change, cause, correction, or
+replacement questions. This single plan is executed directly: do not assume another
+planner will reinterpret a need. Assign every need a positive integer budget and make
+the budgets sum exactly to the Total initial retrieval budget supplied by the user.
+Allocate more budget to the needs most important or difficult for answering the
+question. Return JSON only."""
 
 EVONEED_ASSESS_SYSTEM = """You are the evidence-gap controller for a training-free
 text--relation--event RAG system. Judge only the supplied evidence. Update the
