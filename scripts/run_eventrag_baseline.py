@@ -888,6 +888,8 @@ async def run(args: argparse.Namespace) -> int:
                         "question": question,
                         "elapsed_ms": elapsed_ms,
                         "retrieved": retrieved,
+                        "native_context": str(context),
+                        "native_context_origin": "eventrag_only_need_context",
                     },
                 )
                 print(f"Retrieved {query_id}: {len(retrieved)} chunks in {elapsed_ms:.1f} ms")

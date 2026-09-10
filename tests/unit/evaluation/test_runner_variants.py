@@ -112,6 +112,9 @@ def test_evolink_agentic_methods_are_registered_without_a_new_index(tmp_path) ->
             "ours_evoneed_planned_shared",
             "ours_evoneed_equal",
             "ours_evoneed_dynamic",
+            "ours_evoneed_deep",
+            "ours_evoneed_deep_oneplan",
+            "ours_evoneed_deep_oneplan_d1_norerank",
         ),
     )
 
@@ -133,6 +136,15 @@ def test_evolink_agentic_methods_are_registered_without_a_new_index(tmp_path) ->
     assert runner._method_retriever(
         "ours_evoneed_dynamic", None, None
     ).__func__ is runner._retrieve_ours_evoneed_dynamic.__func__
+    assert runner._method_retriever(
+        "ours_evoneed_deep", None, None
+    ).__func__ is runner._retrieve_ours_evoneed_deep.__func__
+    assert runner._method_retriever(
+        "ours_evoneed_deep_oneplan", None, None
+    ).__func__ is runner._retrieve_ours_evoneed_deep_oneplan.__func__
+    assert runner._method_retriever(
+        "ours_evoneed_deep_oneplan_d1_norerank", None, None
+    ).__func__ is runner._retrieve_ours_evoneed_deep_oneplan_d1_norerank.__func__
     assert runner.tkg_vector_index is None
 
 
@@ -153,6 +165,74 @@ def test_planned_evoneed_manifest_records_first_round_strategy(tmp_path) -> None
         "parallel_actions": True,
         "max_planned_actions": 3,
     }
+
+
+def test_evoneed_deep_manifest_freezes_legacy_high_depth_strategy(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_evoneed_deep",),
+    )
+
+    runner._ensure_output_manifest()
+    manifest = json.loads((tmp_path / "output" / "run_manifest.json").read_text())
+
+    assert "evoneed_profile" not in manifest
+    assert manifest["evoneed_deep_profile"] == {
+        "version": "ours_evoneed_deep_v1_legacy_plan_assess",
+        "prompt_digest": manifest["evoneed_deep_profile"]["prompt_digest"],
+        "initial_retrieval": "planned_needs",
+        "max_planned_actions": 3,
+        "allow_repeated_routes": True,
+        "query_composition": "planner_subquery_only",
+        "route_budget_mode": "per_action",
+        "candidate_budget_per_need": 10,
+        "candidate_multiplier": 3,
+        "cross_path_expansion": "one_evolink_per_need",
+        "llm_stages": ["plan", "assess_and_rerank"],
+        "final_output_k": 10,
+    }
+
+
+def test_evoneed_deep_oneplan_manifest_removes_secondary_planner(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_evoneed_deep_oneplan",),
+    )
+
+    runner._ensure_output_manifest()
+    manifest = json.loads((tmp_path / "output" / "run_manifest.json").read_text())
+    profile = manifest["evoneed_deep_oneplan_profile"]
+
+    assert profile["candidate_budget_per_need"] == 10
+    assert profile["candidate_multiplier"] == 1
+    assert profile["cross_path_expansion"] == "one_evolink_per_need"
+    assert profile["secondary_query_planner_calls"] == 0
+
+
+def test_evoneed_deep_oneplan_norerank_manifest_uses_plain_rrf(tmp_path) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_evoneed_deep_oneplan_d1_norerank",),
+    )
+
+    runner._ensure_output_manifest()
+    manifest = json.loads((tmp_path / "output" / "run_manifest.json").read_text())
+    profile = manifest["evoneed_deep_oneplan_d1_norerank_profile"]
+
+    assert profile["candidate_multiplier"] == 1
+    assert profile["need_fusion"] == "plain_rrf"
+    assert profile["rrf_k"] == 60
+    assert profile["llm_stages"] == ["joint_plan"]
+    assert profile["llm_rerank"] is False
 
 
 def test_planned_shared_evoneed_manifest_records_fixed_total_budget(tmp_path) -> None:
@@ -192,6 +272,7 @@ def test_equal_and_dynamic_evoneed_share_the_same_total_budget(tmp_path) -> None
 
     assert profile["joint_planner_calls_per_query"] == 1
     assert profile["cross_path_expansion"] == "one_shared_evolink_after_all_routes"
+    assert profile["query_composition"] == "original_question_plus_need_focus"
     assert profile["equal_budget"]["total_initial_budget"] == 60
     assert profile["dynamic_budget"]["total_initial_budget"] == 60
     assert profile["dynamic_budget"]["minimum_active_route_budget"] == 5
@@ -255,6 +336,55 @@ async def test_evoneed_routes_share_one_post_retrieval_evolink_call(tmp_path) ->
         {"event"},
     ]
     assert all(plan is not None for _, _, plan in orchestrator.routes)
+
+
+@pytest.mark.asyncio
+async def test_evoneed_deep_oneplan_passes_first_plan_directly_to_retrieval(
+    tmp_path,
+) -> None:
+    runner = EvaluationRunner(
+        _dataset(),
+        Settings(_env_file=None, embedding_provider="zhipu"),
+        runtime_dir=tmp_path / "runtime",
+        output_dir=tmp_path / "output",
+        methods=("ours_evoneed_deep_oneplan",),
+    )
+
+    class FakeOrchestrator:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def retrieve(self, question, **kwargs):
+            self.calls.append((question, kwargs))
+            return UnifiedRetrievalResult(
+                plan=kwargs["plan_override"],
+                bundles=(),
+                candidates={"vector": (), "graph": (), "event": ()},
+            )
+
+    orchestrator = FakeOrchestrator()
+    runner.unified_orchestrator = orchestrator  # type: ignore[assignment]
+    need = NeedItem(
+        need_id="event",
+        knowledge_type="evolution_evidence",
+        query="Acme change timeline",
+        route="event",
+        low_level_keywords=["Acme"],
+        high_level_keywords=["change timeline"],
+        entities=["Acme"],
+        state_intents=["change"],
+        expand_event_chain=True,
+    )
+
+    await runner._retrieve_evoneed_deep_oneplan_actions([need], [20])
+
+    assert len(orchestrator.calls) == 1
+    question, kwargs = orchestrator.calls[0]
+    assert question == "Acme change timeline"
+    assert kwargs["channels"] == {"event"}
+    assert kwargs["candidate_multiplier"] == 1
+    assert kwargs["link_evidence"] is True
+    assert kwargs["plan_override"].low_level_keywords == ["Acme"]
 
 
 def test_ours_tkg_has_no_controlled_lightrag_method_dependency(tmp_path) -> None:

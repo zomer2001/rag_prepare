@@ -798,6 +798,12 @@ async def run(args: argparse.Namespace) -> int:
                     response = await combined_rag.aquery(question, query_param(api, args))
                 elapsed_ms = (perf_counter() - started) * 1000
                 retrieved, stats = retrieved_rows(response, lookup, top_k=args.top_k)
+                native_context = str(response[0]) if isinstance(response, tuple) else str(response)
+                native_nodes = (
+                    response[1]
+                    if isinstance(response, tuple) and len(response) > 1
+                    else []
+                )
                 append_jsonl(
                     output_path,
                     {
@@ -806,6 +812,9 @@ async def run(args: argparse.Namespace) -> int:
                         "elapsed_ms": elapsed_ms,
                         "retrieved": retrieved,
                         "official_response_stats": stats,
+                        "native_context": native_context,
+                        "native_nodes": native_nodes,
+                        "native_context_origin": "e2rag_only_need_context",
                     },
                 )
                 query_progress.update(1)

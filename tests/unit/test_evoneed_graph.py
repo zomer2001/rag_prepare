@@ -4,10 +4,12 @@ import pytest
 
 from rag_graph_demo.agentic.evoneed import (
     EvoNeedRAGGraph,
+    _with_question_anchor,
     allocate_route_budgets,
     need_coverage_fusion,
     normalize_need_state,
     prioritize_supported_evidence,
+    reciprocal_rank_fusion_needs,
 )
 from rag_graph_demo.agentic.models import (
     EstablishedFinding,
@@ -278,8 +280,20 @@ async def test_planned_evoneed_uses_planner_actions_in_first_round() -> None:
     )
 
     assert calls == [
-        ("text", "vector", "Acme exact announcement", 10),
-        ("evolution", "event", "Acme relationship change timeline", 10),
+        (
+            "text",
+            "vector",
+            "How did Acme's relationship change?\n"
+            "Retrieval focus: Acme exact announcement",
+            10,
+        ),
+        (
+            "evolution",
+            "event",
+            "How did Acme's relationship change?\n"
+            "Retrieval focus: Acme relationship change timeline",
+            10,
+        ),
     ]
     assert run.retrieval_rounds == 1
     assert run.llm_calls == 3
@@ -291,6 +305,55 @@ async def test_planned_evoneed_uses_planner_actions_in_first_round() -> None:
         "doc-vector",
         "doc-event",
     }
+
+
+@pytest.mark.asyncio
+async def test_evoneed_deep_uses_raw_subqueries_and_stops_after_rerank() -> None:
+    calls: list[tuple[str, str, int]] = []
+
+    async def retrieve(
+        needs: list[NeedItem], budgets: list[int]
+    ) -> list[list[RetrievedChunk]]:
+        calls.extend(
+            (need.route, need.query, budget)
+            for need, budget in zip(needs, budgets, strict=True)
+        )
+        return [
+            [
+                RetrievedChunk(
+                    chunk_id=f"chunk-{need.route}",
+                    document_id=f"doc-{need.route}",
+                    text=f"{need.route} evidence",
+                )
+            ]
+            for need in needs
+        ]
+
+    run = await EvoNeedRAGGraph(
+        retrieve,
+        FakeEvoNeedModel(),
+        initial_retrieval="planned_needs",
+        deduplicate_initial_routes=False,
+        anchor_planned_queries=False,
+    ).run(
+        "How did Acme's relationship change?",
+        top_k=20,
+        context_k=20,
+        max_retrieval_rounds=1,
+        rrf_k=60,
+        assessment_only=True,
+    )
+
+    assert calls == [
+        ("vector", "Acme exact announcement", 20),
+        ("event", "Acme relationship change timeline", 20),
+    ]
+    assert run.llm_calls == 2
+    assert [item["node"] for item in run.trace] == [
+        "plan_needs",
+        "retrieve_needs",
+        "assess_needs",
+    ]
 
 
 @pytest.mark.asyncio
@@ -405,6 +468,30 @@ def test_need_coverage_fusion_prefers_new_need_coverage() -> None:
 
     assert [item.document_id for item in result] == ["doc-repeated", "doc-new"]
     assert result[0].metadata["fusion"] == "evoneed_coverage_rrf"
+
+
+def test_plain_need_rrf_rewards_documents_retrieved_for_multiple_needs() -> None:
+    repeated = RetrievedChunk(
+        chunk_id="repeated",
+        document_id="doc-repeated",
+        text="repeated",
+        metadata={"supported_need_ids": ["need-a"], "channels": ["vector"]},
+    )
+    single = RetrievedChunk(
+        chunk_id="single",
+        document_id="doc-single",
+        text="single",
+        metadata={"supported_need_ids": ["need-b"], "channels": ["event"]},
+    )
+
+    result = reciprocal_rank_fusion_needs(
+        [[repeated], [single, repeated]],
+        rrf_k=60,
+        limit=2,
+    )
+
+    assert [item.document_id for item in result] == ["doc-repeated", "doc-single"]
+    assert result[0].metadata["fusion"] == "evoneed_plain_rrf"
 
 
 def test_need_actions_enter_fusion_as_independent_ranked_lists() -> None:
@@ -554,6 +641,26 @@ def test_repeated_open_query_restores_full_question_context() -> None:
         "TechCrunch report. Full question context: "
         "What changed between the two TechCrunch reports?"
     )
+
+
+def test_planned_need_search_keeps_original_question_anchor() -> None:
+    need = NeedItem(
+        need_id="source",
+        knowledge_type="text_evidence",
+        query="TechCrunch report subscription policy",
+        route="vector",
+    )
+
+    anchored = _with_question_anchor(
+        need,
+        "How did Twitch and Beeper differ in their subscription strategies?",
+    )
+
+    assert anchored.query == (
+        "How did Twitch and Beeper differ in their subscription strategies?\n"
+        "Retrieval focus: TechCrunch report subscription policy"
+    )
+    assert need.query == "TechCrunch report subscription policy"
 
 
 def test_blank_assessment_query_reuses_previous_query() -> None:

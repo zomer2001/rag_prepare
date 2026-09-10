@@ -20,7 +20,13 @@ from rag_graph_demo.agentic.model import DeepSeekAgentModel
 from rag_graph_demo.agentic.models import AgenticRun, NeedItem
 from rag_graph_demo.agentic.prompts import (
     AGENTIC_PROMPT_PROFILE_VERSION,
+    EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+    EVONEED_DEEP_ONEPLAN_SYSTEM,
+    EVONEED_DEEP_PLAN_SYSTEM,
+    EVONEED_DEEP_PROMPT_PROFILE_VERSION,
     EVONEED_PROMPT_PROFILE_VERSION,
+    evoneed_deep_oneplan_prompt_profile_digest,
+    evoneed_deep_prompt_profile_digest,
     evoneed_prompt_profile_digest,
     prompt_profile_digest,
 )
@@ -97,6 +103,9 @@ VALID_METHODS = (
     "ours_evoneed_planned_shared",
     "ours_evoneed_equal",
     "ours_evoneed_dynamic",
+    "ours_evoneed_deep",
+    "ours_evoneed_deep_oneplan",
+    "ours_evoneed_deep_oneplan_d1_norerank",
     "ours_tkg",
     "ours_tkg_dynamic",
     "agentic_hybrid",
@@ -116,6 +125,9 @@ AGENTIC_METHODS = {
     "ours_evoneed_planned_shared",
     "ours_evoneed_equal",
     "ours_evoneed_dynamic",
+    "ours_evoneed_deep",
+    "ours_evoneed_deep_oneplan",
+    "ours_evoneed_deep_oneplan_d1_norerank",
     "agentic_ours_tkg",
     "agentic_ours_tkg_dynamic",
 }
@@ -128,6 +140,9 @@ CONTROLLED_METHODS = {
     "ours_evoneed_planned_shared",
     "ours_evoneed_equal",
     "ours_evoneed_dynamic",
+    "ours_evoneed_deep",
+    "ours_evoneed_deep_oneplan",
+    "ours_evoneed_deep_oneplan_d1_norerank",
     "agentic_light_entity",
     "agentic_ours",
     "agentic_ours_evolink",
@@ -140,6 +155,9 @@ EVENT_METHODS = {
     "ours_evoneed_planned_shared",
     "ours_evoneed_equal",
     "ours_evoneed_dynamic",
+    "ours_evoneed_deep",
+    "ours_evoneed_deep_oneplan",
+    "ours_evoneed_deep_oneplan_d1_norerank",
     "agentic_ours",
     "agentic_ours_evolink",
 }
@@ -150,6 +168,9 @@ EVOLINK_METHODS = {
     "ours_evoneed_planned_shared",
     "ours_evoneed_equal",
     "ours_evoneed_dynamic",
+    "ours_evoneed_deep",
+    "ours_evoneed_deep_oneplan",
+    "ours_evoneed_deep_oneplan_d1_norerank",
     "agentic_ours_evolink",
 }
 EVONEED_METHODS = {
@@ -158,7 +179,19 @@ EVONEED_METHODS = {
     "ours_evoneed_planned_shared",
     "ours_evoneed_equal",
     "ours_evoneed_dynamic",
+    "ours_evoneed_deep",
+    "ours_evoneed_deep_oneplan",
+    "ours_evoneed_deep_oneplan_d1_norerank",
 }
+DEEP_EVONEED_METHODS = {
+    "ours_evoneed_deep",
+    "ours_evoneed_deep_oneplan",
+    "ours_evoneed_deep_oneplan_d1_norerank",
+}
+DEEP_RERANK_METHODS = DEEP_EVONEED_METHODS - {
+    "ours_evoneed_deep_oneplan_d1_norerank"
+}
+STANDARD_EVONEED_METHODS = EVONEED_METHODS - DEEP_EVONEED_METHODS
 TKG_METHODS = {
     "ours_tkg",
     "ours_tkg_dynamic",
@@ -464,6 +497,78 @@ class EvaluationRunner:
                     route_budget_mode="planned_total",
                     minimum_route_budget=self.eval_settings.evoneed_min_route_budget,
                 )
+            if "ours_evoneed_deep" in self.methods:
+                deep_agent_model = DeepSeekAgentModel(
+                    self.eval_settings,
+                    plan_cache_path=(
+                        self.runtime_dir
+                        / "events"
+                        / (
+                            "evoneed_plan_cache_"
+                            f"{EVONEED_DEEP_PROMPT_PROFILE_VERSION}.json"
+                        )
+                    ),
+                    plan_profile=EVONEED_DEEP_PROMPT_PROFILE_VERSION,
+                    plan_system_prompt=EVONEED_DEEP_PLAN_SYSTEM,
+                    plan_uses_total_budget=False,
+                )
+                self.agentic_graphs["ours_evoneed_deep"] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_deep_actions,
+                    deep_agent_model,
+                    initial_retrieval="planned_needs",
+                    route_budget_mode="per_action",
+                    deduplicate_initial_routes=False,
+                    anchor_planned_queries=False,
+                )
+            if "ours_evoneed_deep_oneplan" in self.methods:
+                oneplan_agent_model = DeepSeekAgentModel(
+                    self.eval_settings,
+                    plan_cache_path=(
+                        self.runtime_dir
+                        / "events"
+                        / (
+                            "evoneed_plan_cache_"
+                            f"{EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION}.json"
+                        )
+                    ),
+                    plan_profile=EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                    plan_system_prompt=EVONEED_DEEP_ONEPLAN_SYSTEM,
+                    plan_uses_total_budget=False,
+                )
+                self.agentic_graphs["ours_evoneed_deep_oneplan"] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_deep_oneplan_actions,
+                    oneplan_agent_model,
+                    initial_retrieval="planned_needs",
+                    route_budget_mode="per_action",
+                    deduplicate_initial_routes=False,
+                    anchor_planned_queries=False,
+                )
+            if "ours_evoneed_deep_oneplan_d1_norerank" in self.methods:
+                norerank_agent_model = DeepSeekAgentModel(
+                    self.eval_settings,
+                    plan_cache_path=(
+                        self.runtime_dir
+                        / "events"
+                        / (
+                            "evoneed_plan_cache_"
+                            f"{EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION}.json"
+                        )
+                    ),
+                    plan_profile=EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                    plan_system_prompt=EVONEED_DEEP_ONEPLAN_SYSTEM,
+                    plan_uses_total_budget=False,
+                )
+                self.agentic_graphs[
+                    "ours_evoneed_deep_oneplan_d1_norerank"
+                ] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_deep_oneplan_actions,
+                    norerank_agent_model,
+                    initial_retrieval="planned_needs",
+                    route_budget_mode="per_action",
+                    deduplicate_initial_routes=False,
+                    anchor_planned_queries=False,
+                    need_fusion_mode="rrf",
+                )
             if "agentic_ours_tkg" in self.methods:
                 if self.tkg_retriever is None:
                     raise RuntimeError("Unified TKG retriever is not initialized")
@@ -511,8 +616,20 @@ class EvaluationRunner:
             }
             if AGENTIC_METHODS & set(self.methods):
                 result["agentic_profile"] = AGENTIC_PROMPT_PROFILE_VERSION
-            if EVONEED_METHODS & set(self.methods):
+            if STANDARD_EVONEED_METHODS & set(self.methods):
                 result["evoneed_profile"] = EVONEED_PROMPT_PROFILE_VERSION
+            if "ours_evoneed_deep" in self.methods:
+                result["evoneed_deep_profile"] = (
+                    EVONEED_DEEP_PROMPT_PROFILE_VERSION
+                )
+            if "ours_evoneed_deep_oneplan" in self.methods:
+                result["evoneed_deep_oneplan_profile"] = (
+                    EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION
+                )
+            if "ours_evoneed_deep_oneplan_d1_norerank" in self.methods:
+                result["evoneed_deep_oneplan_d1_norerank_profile"] = (
+                    EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION
+                )
             if TKG_METHODS & set(self.methods):
                 result["tkg_retrieval_profile"] = TKG_RETRIEVAL_PROFILE_VERSION
                 result["tkg_query_planner_profile"] = TKG_QUERY_PLANNER_PROFILE_VERSION
@@ -573,6 +690,12 @@ class EvaluationRunner:
             return self._retrieve_ours_evoneed_equal
         if method == "ours_evoneed_dynamic":
             return self._retrieve_ours_evoneed_dynamic
+        if method == "ours_evoneed_deep":
+            return self._retrieve_ours_evoneed_deep
+        if method == "ours_evoneed_deep_oneplan":
+            return self._retrieve_ours_evoneed_deep_oneplan
+        if method == "ours_evoneed_deep_oneplan_d1_norerank":
+            return self._retrieve_ours_evoneed_deep_oneplan_d1_norerank
         if method == "ours_tkg":
             if self.tkg_retriever is None:
                 raise RuntimeError("Unified TKG retriever is not initialized")
@@ -1285,6 +1408,76 @@ class EvaluationRunner:
     ) -> AgenticRun:
         return await self._retrieve_agentic("ours_evoneed_dynamic", question, top_k)
 
+    async def _retrieve_ours_evoneed_deep(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic("ours_evoneed_deep", question, top_k)
+
+    async def _retrieve_ours_evoneed_deep_oneplan(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic(
+            "ours_evoneed_deep_oneplan", question, top_k
+        )
+
+    async def _retrieve_ours_evoneed_deep_oneplan_d1_norerank(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic(
+            "ours_evoneed_deep_oneplan_d1_norerank", question, top_k
+        )
+
+    async def _retrieve_evoneed_deep_actions(
+        self,
+        needs: list[NeedItem],
+        budgets: list[int],
+    ) -> list[list[RetrievedChunk]]:
+        """Reproduce the legacy high-depth path independently for every need."""
+        if len(needs) != len(budgets):
+            raise ValueError("EvoNeed needs and budgets must have the same length")
+        return await asyncio.gather(
+            *(
+                self._retrieve_unified(
+                    need.query,
+                    budget,
+                    include_events=need.route == "event",
+                    link_evidence=True,
+                    channels={need.route},
+                    candidate_multiplier=3,
+                )
+                for need, budget in zip(needs, budgets, strict=True)
+            )
+        )
+
+    async def _retrieve_evoneed_deep_oneplan_actions(
+        self,
+        needs: list[NeedItem],
+        budgets: list[int],
+    ) -> list[list[RetrievedChunk]]:
+        """Execute first-stage retrieval plans without a second LLM planner."""
+        if len(needs) != len(budgets):
+            raise ValueError("EvoNeed needs and budgets must have the same length")
+        return await asyncio.gather(
+            *(
+                self._retrieve_unified(
+                    need.query,
+                    budget,
+                    include_events=need.route == "event",
+                    link_evidence=True,
+                    channels={need.route},
+                    candidate_multiplier=1,
+                    plan_override=self._query_plan_from_need(need),
+                )
+                for need, budget in zip(needs, budgets, strict=True)
+            )
+        )
+
     async def _retrieve_evoneed_actions(
         self,
         needs: list[NeedItem],
@@ -1448,7 +1641,21 @@ class EvaluationRunner:
             "max_retrieval_rounds": self.eval_settings.agentic_max_retrieval_rounds,
             "rrf_k": self.eval_settings.agentic_rrf_k,
         }
-        if method in EVONEED_METHODS:
+        if method == "ours_evoneed_deep_oneplan_d1_norerank":
+            return await graph.run(
+                question,
+                retrieval_budget=top_k,
+                retrieval_only=True,
+                **run_kwargs,
+            )
+        if method in DEEP_RERANK_METHODS:
+            return await graph.run(
+                question,
+                retrieval_budget=top_k,
+                assessment_only=True,
+                **run_kwargs,
+            )
+        if method in STANDARD_EVONEED_METHODS:
             return await graph.run(
                 question,
                 retrieval_budget=self.eval_settings.evoneed_retrieval_budget,
@@ -1580,7 +1787,7 @@ class EvaluationRunner:
                 "expansion_limit": self.eval_settings.evolink_expansion_limit,
                 "link_weight": self.eval_settings.evolink_link_weight,
             }
-        if EVONEED_METHODS & set(self.methods):
+        if STANDARD_EVONEED_METHODS & set(self.methods):
             expected["evoneed_profile"] = {
                 "version": EVONEED_PROMPT_PROFILE_VERSION,
                 "prompt_digest": evoneed_prompt_profile_digest(),
@@ -1592,6 +1799,7 @@ class EvaluationRunner:
                 "selective_routes": ["vector", "graph", "event"],
                 "joint_planner_calls_per_query": 1,
                 "cross_path_expansion": "one_shared_evolink_after_all_routes",
+                "query_composition": "original_question_plus_need_focus",
                 "initial_retrieval_budget": self.eval_settings.evoneed_retrieval_budget,
                 "minimum_active_route_budget": (
                     self.eval_settings.evoneed_min_route_budget
@@ -1634,6 +1842,56 @@ class EvaluationRunner:
                     ),
                     "allocation": "planner_proposed_normalized_to_total",
                 }
+        if "ours_evoneed_deep" in self.methods:
+            expected["evoneed_deep_profile"] = {
+                "version": EVONEED_DEEP_PROMPT_PROFILE_VERSION,
+                "prompt_digest": evoneed_deep_prompt_profile_digest(),
+                "initial_retrieval": "planned_needs",
+                "max_planned_actions": 3,
+                "allow_repeated_routes": True,
+                "query_composition": "planner_subquery_only",
+                "route_budget_mode": "per_action",
+                "candidate_budget_per_need": self.top_k,
+                "candidate_multiplier": 3,
+                "cross_path_expansion": "one_evolink_per_need",
+                "llm_stages": ["plan", "assess_and_rerank"],
+                "final_output_k": self.top_k,
+            }
+        if "ours_evoneed_deep_oneplan" in self.methods:
+            expected["evoneed_deep_oneplan_profile"] = {
+                "version": EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                "prompt_digest": evoneed_deep_oneplan_prompt_profile_digest(),
+                "initial_retrieval": "planned_needs",
+                "max_planned_actions": 3,
+                "allow_repeated_routes": True,
+                "query_composition": "planner_subquery_only",
+                "route_budget_mode": "per_action",
+                "candidate_budget_per_need": self.top_k,
+                "candidate_multiplier": 1,
+                "cross_path_expansion": "one_evolink_per_need",
+                "llm_stages": ["joint_plan", "assess_and_rerank"],
+                "secondary_query_planner_calls": 0,
+                "final_output_k": self.top_k,
+            }
+        if "ours_evoneed_deep_oneplan_d1_norerank" in self.methods:
+            expected["evoneed_deep_oneplan_d1_norerank_profile"] = {
+                "version": EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                "prompt_digest": evoneed_deep_oneplan_prompt_profile_digest(),
+                "initial_retrieval": "planned_needs",
+                "max_planned_actions": 3,
+                "allow_repeated_routes": True,
+                "query_composition": "planner_subquery_only",
+                "route_budget_mode": "per_action",
+                "candidate_budget_per_need": self.top_k,
+                "candidate_multiplier": 1,
+                "cross_path_expansion": "one_evolink_per_need",
+                "need_fusion": "plain_rrf",
+                "rrf_k": self.eval_settings.agentic_rrf_k,
+                "llm_stages": ["joint_plan"],
+                "secondary_query_planner_calls": 0,
+                "llm_rerank": False,
+                "final_output_k": self.top_k,
+            }
         if self.chunking_strategy != "fixed":
             expected["chunking_strategy"] = self.chunking_strategy
         if path.is_file():

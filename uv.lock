@@ -2629,7 +2629,9 @@ dependencies = [
 evaluation = [
     { name = "datasets" },
     { name = "langchain-text-splitters" },
+    { name = "networkx" },
     { name = "rank-bm25" },
+    { name = "tiktoken" },
 ]
 eventrag = [
     { name = "colorama" },
@@ -2658,6 +2660,7 @@ requires-dist = [
     { name = "lightrag-hku", specifier = "==1.5.3" },
     { name = "nano-vectordb", marker = "extra == 'eventrag'", specifier = ">=0.0.4.3,<1" },
     { name = "neo4j", specifier = ">=5.28,<7" },
+    { name = "networkx", marker = "extra == 'evaluation'", specifier = ">=3,<4" },
     { name = "openai", specifier = ">=1.90,<3" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
     { name = "pyshacl", specifier = ">=0.30,<1" },
@@ -2667,6 +2670,7 @@ requires-dist = [
     { name = "rdflib", specifier = ">=7.1,<8" },
     { name = "sentence-transformers", specifier = ">=5,<6" },
     { name = "streamlit", specifier = ">=1.45,<2" },
+    { name = "tiktoken", marker = "extra == 'evaluation'", specifier = ">=0.9,<1" },
     { name = "tqdm", specifier = ">=4.67,<5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
 ]

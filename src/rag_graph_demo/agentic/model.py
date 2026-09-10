@@ -66,11 +66,17 @@ class DeepSeekAgentModel:
         settings: Settings,
         *,
         plan_cache_path: Path | None = None,
+        plan_profile: str = EVONEED_PROMPT_PROFILE_VERSION,
+        plan_system_prompt: str = EVONEED_PLAN_SYSTEM,
+        plan_uses_total_budget: bool = True,
     ) -> None:
         if not settings.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY is required for agentic retrieval")
         self.settings = settings
         self.plan_cache_path = plan_cache_path
+        self.plan_profile = plan_profile
+        self.plan_system_prompt = plan_system_prompt
+        self.plan_uses_total_budget = plan_uses_total_budget
         raw_cache = read_json(plan_cache_path, default={}) if plan_cache_path else {}
         self._plan_cache = raw_cache if isinstance(raw_cache, dict) else {}
         self.client = AsyncOpenAI(
@@ -104,21 +110,23 @@ class DeepSeekAgentModel:
         *,
         total_budget: int,
     ) -> ModelCall[KnowledgeNeedState]:
+        cache_budget = str(total_budget) if self.plan_uses_total_budget else "unbounded"
         cache_key = hashlib.sha256(
-            (
-                f"{EVONEED_PROMPT_PROFILE_VERSION}\x1f{total_budget}\x1f{question}"
-            ).encode()
+            f"{self.plan_profile}\x1f{cache_budget}\x1f{question}".encode()
         ).hexdigest()
         cached = self._plan_cache.get(cache_key)
         if isinstance(cached, dict):
             return ModelCall(value=KnowledgeNeedState.model_validate(cached))
-        user = (
-            f"Question: {question}\nTotal retrieval candidate budget: {total_budget}\n\n"
-            "Allocate that total budget across the proposed needs. Return JSON only."
-        )
+        if self.plan_uses_total_budget:
+            user = (
+                f"Question: {question}\nTotal retrieval candidate budget: {total_budget}\n\n"
+                "Allocate that total budget across the proposed needs. Return JSON only."
+            )
+        else:
+            user = f"Question: {question}\n\nReturn JSON only."
         call = await self._json_call(
             KnowledgeNeedState,
-            EVONEED_PLAN_SYSTEM,
+            self.plan_system_prompt,
             user,
             model=self.settings.deepseek_extraction_model,
         )

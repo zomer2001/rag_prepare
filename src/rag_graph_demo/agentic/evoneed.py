@@ -68,6 +68,7 @@ class EvoNeedState(TypedDict, total=False):
     input_tokens: int
     output_tokens: int
     retrieval_only: bool
+    assessment_only: bool
 
 
 class EvoNeedRAGGraph:
@@ -83,6 +84,9 @@ class EvoNeedRAGGraph:
             "per_action", "shared_total", "equal_total", "planned_total"
         ] = "per_action",
         minimum_route_budget: int = 1,
+        deduplicate_initial_routes: bool = True,
+        anchor_planned_queries: bool = True,
+        need_fusion_mode: Literal["coverage", "rrf"] = "coverage",
     ) -> None:
         if initial_retrieval not in {"question_anchor", "planned_needs"}:
             raise ValueError(f"Unsupported initial retrieval mode: {initial_retrieval}")
@@ -95,11 +99,16 @@ class EvoNeedRAGGraph:
             raise ValueError(f"Unsupported route budget mode: {route_budget_mode}")
         if minimum_route_budget < 1:
             raise ValueError("minimum_route_budget must be positive")
+        if need_fusion_mode not in {"coverage", "rrf"}:
+            raise ValueError(f"Unsupported need fusion mode: {need_fusion_mode}")
         self.retriever = retriever
         self.model = model
         self.initial_retrieval = initial_retrieval
         self.route_budget_mode = route_budget_mode
         self.minimum_route_budget = minimum_route_budget
+        self.deduplicate_initial_routes = deduplicate_initial_routes
+        self.anchor_planned_queries = anchor_planned_queries
+        self.need_fusion_mode = need_fusion_mode
         builder = StateGraph(EvoNeedState)
         builder.add_node("plan", self._plan)
         builder.add_node("retrieve", self._retrieve)
@@ -115,7 +124,7 @@ class EvoNeedRAGGraph:
         builder.add_conditional_edges(
             "assess",
             self._route_after_assessment,
-            {"retrieve": "retrieve", "answer": "answer"},
+            {"retrieve": "retrieve", "answer": "answer", "end": END},
         )
         builder.add_edge("answer", END)
         self.compiled = builder.compile()
@@ -130,6 +139,7 @@ class EvoNeedRAGGraph:
         rrf_k: int,
         retrieval_budget: int | None = None,
         retrieval_only: bool = False,
+        assessment_only: bool = False,
     ) -> AgenticRun:
         state = await self.compiled.ainvoke(
             {
@@ -147,6 +157,7 @@ class EvoNeedRAGGraph:
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "retrieval_only": retrieval_only,
+                "assessment_only": assessment_only,
             }
         )
         answer = state.get("answer") or GroundedAnswer(
@@ -180,6 +191,7 @@ class EvoNeedRAGGraph:
             call.value,
             question=state["question"],
             initial=True,
+            deduplicate_initial_routes=self.deduplicate_initial_routes,
         )
         return {
             "need_state": need_state,
@@ -255,20 +267,31 @@ class EvoNeedRAGGraph:
                 else 1
             ),
         )
-        results = await self.retriever(open_needs, budgets)
+        # A focused planner query can omit a source or comparison anchor from
+        # the user's wording. Search with both representations in one query;
+        # this does not add a retrieval round or another model call.
+        search_needs = (
+            [_with_question_anchor(item, state["question"]) for item in open_needs]
+            if self.anchor_planned_queries
+            else open_needs
+        )
+        results = await self.retriever(search_needs, budgets)
         if len(results) != len(open_needs):
             raise RuntimeError("EvoNeed retriever returned the wrong number of action batches")
         retrieval_round = state["retrieval_round"] + 1
         action_batches: list[list[RetrievedChunk]] = []
         round_result_count = 0
         actions: list[dict[str, Any]] = []
-        for need, budget, values in zip(open_needs, budgets, results, strict=True):
+        for need, search_need, budget, values in zip(
+            open_needs, search_needs, budgets, results, strict=True
+        ):
             actions.append(
                 {
                     "need_id": need.need_id,
                     "knowledge_type": need.knowledge_type,
                     "route": need.route,
-                    "query": need.query,
+                    "query": search_need.query,
+                    "planned_query": need.query,
                     "planned_budget": need.budget,
                     "budget": budget,
                     "result_count": len(values),
@@ -298,11 +321,12 @@ class EvoNeedRAGGraph:
                 round_result_count += 1
             action_batches.append(action_batch)
         batches = [*state["retrieval_batches"], *action_batches]
-        evidence = need_coverage_fusion(
-            batches,
-            rrf_k=state["rrf_k"],
-            limit=state["context_k"],
+        fusion = (
+            need_coverage_fusion
+            if self.need_fusion_mode == "coverage"
+            else reciprocal_rank_fusion_needs
         )
+        evidence = fusion(batches, rrf_k=state["rrf_k"], limit=state["context_k"])
         return {
             "retrieval_batches": batches,
             "evidence": evidence,
@@ -314,6 +338,7 @@ class EvoNeedRAGGraph:
                     "round": retrieval_round,
                     "initial_retrieval": self.initial_retrieval,
                     "route_budget_mode": self.route_budget_mode,
+                    "need_fusion_mode": self.need_fusion_mode,
                     "total_candidate_budget": sum(budgets),
                     "actions": actions,
                     "result_count": round_result_count,
@@ -355,6 +380,8 @@ class EvoNeedRAGGraph:
         }
 
     def _route_after_assessment(self, state: EvoNeedState) -> str:
+        if state.get("assessment_only", False):
+            return "end"
         if state["need_state"].sufficient:
             return "answer"
         if state["retrieval_round"] >= state["max_retrieval_rounds"]:
@@ -452,6 +479,7 @@ def normalize_need_state(
     initial: bool = False,
     valid_evidence_ids: set[str] | None = None,
     previous_state: KnowledgeNeedState | None = None,
+    deduplicate_initial_routes: bool = True,
 ) -> KnowledgeNeedState:
     route_by_type = {
         "text_evidence": "vector",
@@ -530,7 +558,7 @@ def normalize_need_state(
             needs[-1] = evolution_need
         else:
             needs.append(evolution_need)
-    if initial:
+    if initial and deduplicate_initial_routes:
         # The controlled experiment permits at most one action per retrieval route.
         unique_routes: dict[str, NeedItem] = {}
         for item in needs:
@@ -659,6 +687,52 @@ def need_coverage_fusion(
     return result
 
 
+def reciprocal_rank_fusion_needs(
+    batches: list[list[RetrievedChunk]],
+    *,
+    rrf_k: int,
+    limit: int,
+) -> list[RetrievedChunk]:
+    """Fuse need-level ranked lists with plain deterministic RRF."""
+    scores: dict[str, float] = {}
+    selected: dict[str, RetrievedChunk] = {}
+    first_seen: dict[str, int] = {}
+    need_ids: dict[str, set[str]] = {}
+    channels: dict[str, set[str]] = {}
+    sequence = 0
+    for batch in batches:
+        seen: set[str] = set()
+        for rank, item in enumerate(batch, start=1):
+            key = evidence_id(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank)
+            selected.setdefault(key, item)
+            first_seen.setdefault(key, sequence)
+            sequence += 1
+            need_ids.setdefault(key, set()).update(
+                str(value) for value in item.metadata.get("supported_need_ids") or []
+            )
+            channels.setdefault(key, set()).update(
+                str(value) for value in item.metadata.get("channels") or []
+            )
+    ordered = sorted(scores, key=lambda key: (-scores[key], first_seen[key]))[:limit]
+    return [
+        replace(
+            selected[key],
+            score=scores[key],
+            metadata={
+                **selected[key].metadata,
+                "fusion": "evoneed_plain_rrf",
+                "supported_need_ids": sorted(need_ids[key]),
+                "channels": sorted(channels[key]),
+            },
+        )
+        for key in ordered
+    ]
+
+
 def prioritize_supported_evidence(
     evidence: list[RetrievedChunk],
     need_state: KnowledgeNeedState,
@@ -736,6 +810,15 @@ def _same_query(left: str, right: str) -> bool:
         return " ".join(value.casefold().split()).strip(" ?.,;:")
 
     return normalize(left) == normalize(right)
+
+
+def _with_question_anchor(need: NeedItem, question: str) -> NeedItem:
+    """Preserve the original question while retaining the planner's focus."""
+    if _same_query(need.query, question):
+        return need
+    return need.model_copy(
+        update={"query": f"{question}\nRetrieval focus: {need.query}"}
+    )
 
 
 def _progress_repeated_query(
