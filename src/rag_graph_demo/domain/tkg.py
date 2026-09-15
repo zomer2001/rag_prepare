@@ -375,6 +375,9 @@ class TKGExpansionRequest(BaseModel):
     include_inactive: bool = True
     include_disputed: bool = True
     expand_event_chain: bool = False
+    # Disable only the event -> effect -> assertion lifecycle bridge for
+    # the association-only mechanism ablation.
+    include_event_effects: bool = True
     limit: int = Field(default=100, ge=1, le=500)
 
 

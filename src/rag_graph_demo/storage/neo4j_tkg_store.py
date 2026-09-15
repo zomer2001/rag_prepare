@@ -588,6 +588,7 @@ class Neo4jTKGStore:
             MATCH (seed_event:RagTKGEvent)-[:HAS_EFFECT]->(:RagTKGEffect)-[:AFFECTS]->(a)
             WHERE seed_event.workspace_id = $workspace_id
               AND seed_event.event_id IN $event_ids
+              AND $include_event_effects
           }
         )
         AND ($include_inactive OR NOT a.status IN ['inactive','superseded','retracted'])
@@ -610,6 +611,7 @@ class Neo4jTKGStore:
         LIMIT $limit
         OPTIONAL MATCH (m:RagTKGMention)-[:SUPPORTS]->(a)
         OPTIONAL MATCH (v:RagTKGEvent)-[:HAS_EFFECT]->(ef:RagTKGEffect)-[:AFFECTS]->(a)
+        WHERE $include_event_effects
         OPTIONAL MATCH (c:RagTKGConflict)-[:INVOLVES]->(a)
         RETURN collect(DISTINCT properties(a)) AS assertions,
                collect(DISTINCT properties(s)) + collect(DISTINCT properties(o)) AS entities,

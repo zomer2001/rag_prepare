@@ -98,6 +98,7 @@ VALID_METHODS = (
     "light_entity",
     "ours",
     "ours_evolink",
+    "ours_association_only",
     "ours_evoneed",
     "ours_evoneed_planned",
     "ours_evoneed_planned_shared",
@@ -106,6 +107,13 @@ VALID_METHODS = (
     "ours_evoneed_deep",
     "ours_evoneed_deep_oneplan",
     "ours_evoneed_deep_oneplan_d1_norerank",
+    "ours_evoneed_deep_oneplan_nolink_norerank",
+    "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+    "ours_evoneed_deep_oneplan_shared_total_norerank",
+    "ours_d1_direct_noplan",
+    "ours_d1_queryrewrite",
+    "ours_d1_queryrewrite_sharedlink",
+    "ours_d1_queryrewrite_sharedlink_total",
     "ours_tkg",
     "ours_tkg_dynamic",
     "agentic_hybrid",
@@ -128,6 +136,9 @@ AGENTIC_METHODS = {
     "ours_evoneed_deep",
     "ours_evoneed_deep_oneplan",
     "ours_evoneed_deep_oneplan_d1_norerank",
+    "ours_evoneed_deep_oneplan_nolink_norerank",
+    "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+    "ours_evoneed_deep_oneplan_shared_total_norerank",
     "agentic_ours_tkg",
     "agentic_ours_tkg_dynamic",
 }
@@ -135,6 +146,7 @@ CONTROLLED_METHODS = {
     "light_entity",
     "ours",
     "ours_evolink",
+    "ours_association_only",
     "ours_evoneed",
     "ours_evoneed_planned",
     "ours_evoneed_planned_shared",
@@ -143,6 +155,13 @@ CONTROLLED_METHODS = {
     "ours_evoneed_deep",
     "ours_evoneed_deep_oneplan",
     "ours_evoneed_deep_oneplan_d1_norerank",
+    "ours_evoneed_deep_oneplan_nolink_norerank",
+    "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+    "ours_evoneed_deep_oneplan_shared_total_norerank",
+    "ours_d1_direct_noplan",
+    "ours_d1_queryrewrite",
+    "ours_d1_queryrewrite_sharedlink",
+    "ours_d1_queryrewrite_sharedlink_total",
     "agentic_light_entity",
     "agentic_ours",
     "agentic_ours_evolink",
@@ -150,6 +169,7 @@ CONTROLLED_METHODS = {
 EVENT_METHODS = {
     "ours",
     "ours_evolink",
+    "ours_association_only",
     "ours_evoneed",
     "ours_evoneed_planned",
     "ours_evoneed_planned_shared",
@@ -158,11 +178,19 @@ EVENT_METHODS = {
     "ours_evoneed_deep",
     "ours_evoneed_deep_oneplan",
     "ours_evoneed_deep_oneplan_d1_norerank",
+    "ours_evoneed_deep_oneplan_nolink_norerank",
+    "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+    "ours_evoneed_deep_oneplan_shared_total_norerank",
+    "ours_d1_direct_noplan",
+    "ours_d1_queryrewrite",
+    "ours_d1_queryrewrite_sharedlink",
+    "ours_d1_queryrewrite_sharedlink_total",
     "agentic_ours",
     "agentic_ours_evolink",
 }
 EVOLINK_METHODS = {
     "ours_evolink",
+    "ours_association_only",
     "ours_evoneed",
     "ours_evoneed_planned",
     "ours_evoneed_planned_shared",
@@ -171,6 +199,12 @@ EVOLINK_METHODS = {
     "ours_evoneed_deep",
     "ours_evoneed_deep_oneplan",
     "ours_evoneed_deep_oneplan_d1_norerank",
+    "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+    "ours_evoneed_deep_oneplan_shared_total_norerank",
+    "ours_d1_direct_noplan",
+    "ours_d1_queryrewrite",
+    "ours_d1_queryrewrite_sharedlink",
+    "ours_d1_queryrewrite_sharedlink_total",
     "agentic_ours_evolink",
 }
 EVONEED_METHODS = {
@@ -182,14 +216,28 @@ EVONEED_METHODS = {
     "ours_evoneed_deep",
     "ours_evoneed_deep_oneplan",
     "ours_evoneed_deep_oneplan_d1_norerank",
+    "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+    "ours_evoneed_deep_oneplan_shared_total_norerank",
+}
+D1_METHODS = {
+    "ours_d1_direct_noplan",
+    "ours_d1_queryrewrite",
+    "ours_d1_queryrewrite_sharedlink",
+    "ours_d1_queryrewrite_sharedlink_total",
 }
 DEEP_EVONEED_METHODS = {
     "ours_evoneed_deep",
     "ours_evoneed_deep_oneplan",
     "ours_evoneed_deep_oneplan_d1_norerank",
+    "ours_evoneed_deep_oneplan_nolink_norerank",
+    "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+    "ours_evoneed_deep_oneplan_shared_total_norerank",
 }
 DEEP_RERANK_METHODS = DEEP_EVONEED_METHODS - {
-    "ours_evoneed_deep_oneplan_d1_norerank"
+    "ours_evoneed_deep_oneplan_d1_norerank",
+    "ours_evoneed_deep_oneplan_nolink_norerank",
+    "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+    "ours_evoneed_deep_oneplan_shared_total_norerank",
 }
 STANDARD_EVONEED_METHODS = EVONEED_METHODS - DEEP_EVONEED_METHODS
 TKG_METHODS = {
@@ -310,6 +358,7 @@ class EvaluationRunner:
         self.light_engine: LightRAGEngine | None = None
         self.light_entity_engine: LightRAGEngine | None = None
         self.event_service: EventService | None = None
+        self.query_planner: QueryPlanner | None = None
         self.unified_orchestrator: UnifiedRetrievalOrchestrator | None = None
         self.agentic_graphs: dict[str, AgenticRAGGraph | EvoNeedRAGGraph] = {}
         self.tkg_retriever: UnifiedTKGRetriever | None = None
@@ -391,6 +440,7 @@ class EvaluationRunner:
                 cache_path=self.runtime_dir / "events" / "query_plan_cache.json",
                 strict_failures=True,
             )
+            self.query_planner = planner
             event_vector = EventVectorIndex(
                 self.runtime_dir / "events" / "event_vectors.npz",
                 self.light_entity_engine.embed_texts,
@@ -569,6 +619,85 @@ class EvaluationRunner:
                     anchor_planned_queries=False,
                     need_fusion_mode="rrf",
                 )
+            if "ours_evoneed_deep_oneplan_nolink_norerank" in self.methods:
+                nolink_agent_model = DeepSeekAgentModel(
+                    self.eval_settings,
+                    plan_cache_path=(
+                        self.runtime_dir
+                        / "events"
+                        / (
+                            "evoneed_plan_cache_"
+                            f"{EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION}.json"
+                        )
+                    ),
+                    plan_profile=EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                    plan_system_prompt=EVONEED_DEEP_ONEPLAN_SYSTEM,
+                    plan_uses_total_budget=False,
+                )
+                self.agentic_graphs[
+                    "ours_evoneed_deep_oneplan_nolink_norerank"
+                ] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_deep_oneplan_nolink_actions,
+                    nolink_agent_model,
+                    initial_retrieval="planned_needs",
+                    route_budget_mode="per_action",
+                    deduplicate_initial_routes=False,
+                    anchor_planned_queries=False,
+                    need_fusion_mode="rrf",
+                )
+            if "ours_evoneed_deep_oneplan_shared_equal_total_norerank" in self.methods:
+                shared_agent_model = DeepSeekAgentModel(
+                    self.eval_settings,
+                    plan_cache_path=(
+                        self.runtime_dir
+                        / "events"
+                        / (
+                            "evoneed_plan_cache_"
+                            f"{EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION}.json"
+                        )
+                    ),
+                    plan_profile=EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                    plan_system_prompt=EVONEED_DEEP_ONEPLAN_SYSTEM,
+                    plan_uses_total_budget=False,
+                )
+                self.agentic_graphs[
+                    "ours_evoneed_deep_oneplan_shared_equal_total_norerank"
+                ] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_deep_oneplan_shared_equal_total_actions,
+                    shared_agent_model,
+                    initial_retrieval="planned_needs",
+                    route_budget_mode="per_action",
+                    deduplicate_initial_routes=False,
+                    anchor_planned_queries=False,
+                    need_fusion_mode="rrf",
+                )
+            if "ours_evoneed_deep_oneplan_shared_total_norerank" in self.methods:
+                shared_total_agent_model = DeepSeekAgentModel(
+                    self.eval_settings,
+                    plan_cache_path=(
+                        self.runtime_dir
+                        / "events"
+                        / (
+                            "evoneed_plan_cache_"
+                            f"{EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION}.json"
+                        )
+                    ),
+                    plan_profile=EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                    plan_system_prompt=EVONEED_DEEP_ONEPLAN_SYSTEM,
+                    plan_uses_total_budget=False,
+                )
+                self.agentic_graphs[
+                    "ours_evoneed_deep_oneplan_shared_total_norerank"
+                ] = EvoNeedRAGGraph(
+                    self._retrieve_evoneed_deep_oneplan_shared_total_actions,
+                    shared_total_agent_model,
+                    initial_retrieval="planned_needs",
+                    route_budget_mode="shared_total",
+                    minimum_route_budget=1,
+                    deduplicate_initial_routes=False,
+                    anchor_planned_queries=False,
+                    need_fusion_mode="rrf",
+                )
             if "agentic_ours_tkg" in self.methods:
                 if self.tkg_retriever is None:
                     raise RuntimeError("Unified TKG retriever is not initialized")
@@ -630,6 +759,18 @@ class EvaluationRunner:
                 result["evoneed_deep_oneplan_d1_norerank_profile"] = (
                     EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION
                 )
+            if "ours_evoneed_deep_oneplan_nolink_norerank" in self.methods:
+                result["evoneed_deep_oneplan_nolink_norerank_profile"] = (
+                    EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION
+                )
+            if "ours_evoneed_deep_oneplan_shared_equal_total_norerank" in self.methods:
+                result["evoneed_deep_oneplan_shared_equal_total_norerank_profile"] = (
+                    EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION
+                )
+            if "ours_evoneed_deep_oneplan_shared_total_norerank" in self.methods:
+                result["evoneed_deep_oneplan_shared_total_norerank_profile"] = (
+                    EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION
+                )
             if TKG_METHODS & set(self.methods):
                 result["tkg_retrieval_profile"] = TKG_RETRIEVAL_PROFILE_VERSION
                 result["tkg_query_planner_profile"] = TKG_QUERY_PLANNER_PROFILE_VERSION
@@ -637,6 +778,46 @@ class EvaluationRunner:
                 result["evolink_retrieval_profile"] = (
                     EVOLINK_RETRIEVAL_PROFILE_VERSION
                 )
+            if D1_METHODS & set(self.methods):
+                d1_methods = set(self.methods) & D1_METHODS
+                if "ours_d1_queryrewrite_sharedlink" in d1_methods:
+                    expansion_scope = (
+                        "mixed"
+                        if "ours_d1_direct_noplan" in d1_methods
+                        or "ours_d1_queryrewrite" in d1_methods
+                        else "one_shared_expansion_after_all_routes"
+                    )
+                elif "ours_d1_queryrewrite_sharedlink_total" in d1_methods:
+                    expansion_scope = "one_shared_expansion_fixed_evolink_cap"
+                else:
+                    expansion_scope = "one_independent_expansion_per_route"
+                result["d1_profile"] = {
+                    "methods": sorted(d1_methods),
+                    "max_routes": 3,
+                    "route_budget": self.top_k,
+                    "candidate_multiplier": CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
+                    "cross_path_expansion": expansion_scope,
+                    "fusion": "plain_rrf",
+                    "llm_rerank": False,
+                    "query_planner_calls": (
+                        1
+                        if {
+                            "ours_d1_queryrewrite",
+                            "ours_d1_queryrewrite_sharedlink",
+                            "ours_d1_queryrewrite_sharedlink_total",
+                        }
+                        & set(self.methods)
+                        else 0
+                    ),
+                }
+                if "ours_d1_queryrewrite_sharedlink" in d1_methods:
+                    result["d1_profile"]["shared_expansion_budget"] = (
+                        "route_budget_times_route_count"
+                    )
+                if "ours_d1_queryrewrite_sharedlink_total" in d1_methods:
+                    result["d1_profile"]["shared_expansion_budget"] = (
+                        "fixed_evolink_expansion_cap"
+                    )
             (self.output_dir / "summary.json").write_text(
                 json.dumps(result, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -680,6 +861,8 @@ class EvaluationRunner:
             return self._retrieve_ours
         if method == "ours_evolink":
             return self._retrieve_ours_evolink
+        if method == "ours_association_only":
+            return self._retrieve_ours_association_only
         if method == "ours_evoneed":
             return self._retrieve_ours_evoneed
         if method == "ours_evoneed_planned":
@@ -696,6 +879,20 @@ class EvaluationRunner:
             return self._retrieve_ours_evoneed_deep_oneplan
         if method == "ours_evoneed_deep_oneplan_d1_norerank":
             return self._retrieve_ours_evoneed_deep_oneplan_d1_norerank
+        if method == "ours_evoneed_deep_oneplan_nolink_norerank":
+            return self._retrieve_ours_evoneed_deep_oneplan_nolink_norerank
+        if method == "ours_evoneed_deep_oneplan_shared_equal_total_norerank":
+            return self._retrieve_ours_evoneed_deep_oneplan_shared_equal_total_norerank
+        if method == "ours_evoneed_deep_oneplan_shared_total_norerank":
+            return self._retrieve_ours_evoneed_deep_oneplan_shared_total_norerank
+        if method == "ours_d1_direct_noplan":
+            return self._retrieve_ours_d1_direct_noplan
+        if method == "ours_d1_queryrewrite":
+            return self._retrieve_ours_d1_queryrewrite
+        if method == "ours_d1_queryrewrite_sharedlink":
+            return self._retrieve_ours_d1_queryrewrite_sharedlink
+        if method == "ours_d1_queryrewrite_sharedlink_total":
+            return self._retrieve_ours_d1_queryrewrite_sharedlink_total
         if method == "ours_tkg":
             if self.tkg_retriever is None:
                 raise RuntimeError("Unified TKG retriever is not initialized")
@@ -1357,6 +1554,345 @@ class EvaluationRunner:
             link_evidence=True,
         )
 
+    async def _retrieve_ours_association_only(
+        self,
+        question: str,
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        """Enable EvoLink associations while disabling EventEffect traversal."""
+        if self.event_service is None or self.evolink_graph_store is None:
+            raise RuntimeError("Event and Neo4j indexes are not initialized")
+        return await self._retrieve_unified(
+            question,
+            top_k,
+            include_events=True,
+            link_evidence=True,
+            include_event_effects=False,
+        )
+
+    async def _retrieve_ours_d1_direct_noplan(
+        self,
+        question: str,
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        """Fixed three-route retrieval with independent EvoLink and no LLM planner."""
+        plan = QueryPlan()
+        routes = [
+            ("vector", question, False),
+            ("graph", question, False),
+            ("event", question, True),
+        ]
+        return await self._retrieve_d1_independent_routes(
+            question,
+            top_k,
+            plan=plan,
+            routes=routes,
+            mode="direct_noplan",
+        )
+
+    async def _retrieve_ours_d1_queryrewrite(
+        self,
+        question: str,
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        """One existing QueryPlanner call followed by three route-specific queries."""
+        if self.query_planner is None:
+            raise RuntimeError("Query planner is not initialized")
+        plan = await self.query_planner.plan(question)
+        routes = [
+            (
+                "vector",
+                self._d1_route_query(
+                    question,
+                    plan,
+                    route="vector",
+                ),
+                False,
+            ),
+            (
+                "graph",
+                self._d1_route_query(
+                    question,
+                    plan,
+                    route="graph",
+                ),
+                False,
+            ),
+            (
+                "event",
+                self._d1_route_query(
+                    question,
+                    plan,
+                    route="event",
+                ),
+                True,
+            ),
+        ]
+        return await self._retrieve_d1_independent_routes(
+            question,
+            top_k,
+            plan=plan,
+            routes=routes,
+            mode="queryrewrite",
+        )
+
+    async def _retrieve_ours_d1_queryrewrite_sharedlink(
+        self,
+        question: str,
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        """Use the D1 route queries but run one shared EvoLink expansion."""
+        if self.query_planner is None:
+            raise RuntimeError("Query planner is not initialized")
+        plan = await self.query_planner.plan(question)
+        routes = [
+            (
+                "vector",
+                self._d1_route_query(question, plan, route="vector"),
+                False,
+            ),
+            (
+                "graph",
+                self._d1_route_query(question, plan, route="graph"),
+                False,
+            ),
+            (
+                "event",
+                self._d1_route_query(question, plan, route="event"),
+                True,
+            ),
+        ]
+        return await self._retrieve_d1_shared_routes(
+            question,
+            top_k,
+            plan=plan,
+            routes=routes,
+            mode="queryrewrite_sharedlink",
+        )
+
+    async def _retrieve_ours_d1_queryrewrite_sharedlink_total(
+        self,
+        question: str,
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        """Strict D1 pair: 3x top-k first-stage candidates, EvoLink cap fixed."""
+        if self.query_planner is None:
+            raise RuntimeError("Query planner is not initialized")
+        plan = await self.query_planner.plan(question)
+        routes = [
+            ("vector", self._d1_route_query(question, plan, route="vector"), False),
+            ("graph", self._d1_route_query(question, plan, route="graph"), False),
+            ("event", self._d1_route_query(question, plan, route="event"), True),
+        ]
+        return await self._retrieve_d1_shared_routes(
+            question,
+            top_k,
+            plan=plan,
+            routes=routes,
+            mode="queryrewrite_sharedlink_total",
+            shared_expansion_limit_override=self.eval_settings.evolink_expansion_limit,
+        )
+
+    async def _retrieve_d1_shared_routes(
+        self,
+        question: str,
+        top_k: int,
+        *,
+        plan: QueryPlan,
+        routes: list[tuple[RetrievalChannel, str, bool]],
+        mode: str,
+        shared_expansion_limit_override: int | None = None,
+    ) -> list[RetrievedChunk]:
+        """Retrieve route lists separately, then coordinate them once globally."""
+        if self.unified_orchestrator is None:
+            raise RuntimeError("Unified retrieval orchestrator is not initialized")
+        if self.evolink_graph_store is None:
+            raise RuntimeError("EvoLink coordination graph is not initialized")
+
+        results = await asyncio.gather(
+            *(
+                self.unified_orchestrator.retrieve(
+                    route_query,
+                    top_k=top_k,
+                    include_events=include_events,
+                    link_evidence=False,
+                    candidate_multiplier=CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
+                    channels={route},
+                    plan_override=plan,
+                )
+                for route, route_query, include_events in routes
+            )
+        )
+        shared_total_budget = max(top_k, top_k * len(routes))
+        shared_expansion_limit = (
+            shared_expansion_limit_override
+            if shared_expansion_limit_override is not None
+            else shared_total_budget
+        )
+        shared_evolink, evolink_error = await self.unified_orchestrator.coordinate_planned_results(
+            [plan for _ in routes],
+            results,
+            limit=shared_total_budget,
+            expansion_limit_override=shared_expansion_limit,
+        )
+        channel_candidates: dict[str, list[Any]] = {
+            "vector": [],
+            "graph": [],
+            "event": [],
+        }
+        for result in results:
+            for channel, candidates in result.candidates.items():
+                if channel in channel_candidates:
+                    channel_candidates[channel].extend(candidates)
+        channel_candidates["graph"].extend(shared_evolink.graph_candidates)
+        channel_candidates["event"].extend(shared_evolink.event_candidates)
+        bundles = fuse_evidence(
+            channel_candidates,
+            top_k=top_k,
+            linked_candidate_weight=self.eval_settings.evolink_link_weight,
+        )
+        event_result = next(
+            (
+                result.event_result
+                for result, (_, _, include_events) in zip(results, routes, strict=True)
+                if include_events
+            ),
+            None,
+        )
+        merged = UnifiedRetrievalResult(
+            plan=plan,
+            bundles=tuple(bundles),
+            candidates={
+                channel: tuple(channel_candidates[channel])
+                for channel in ("vector", "graph", "event")
+            },
+            graph_data={
+                "route_results": [result.graph_data for result in results],
+            },
+            evidence_graph=shared_evolink.evidence_graph,
+            event_result=event_result,
+            metadata={
+                "fusion": "shared_route_rrf",
+                "d1_mode": mode,
+                "question": question,
+                "route_queries": [
+                    {
+                        "route": route,
+                        "query": route_query,
+                        "include_events": include_events,
+                    }
+                    for route, route_query, include_events in routes
+                ],
+                "candidate_limit_per_route": top_k,
+                "route_count": len(routes),
+                "evolink_scope": (
+                    "one_shared_expansion_fixed_evolink_cap"
+                    if shared_expansion_limit_override is not None
+                    else "one_shared_expansion_after_all_routes"
+                ),
+                "evolink_expansion_limit": shared_expansion_limit,
+                "shared_evolink_total_budget": shared_total_budget,
+                "evolink_error": evolink_error,
+                "evolink": shared_evolink.metadata,
+                "llm_rerank": False,
+            },
+        )
+        return self._unified_result_to_chunks(merged)
+
+    async def _retrieve_d1_independent_routes(
+        self,
+        question: str,
+        top_k: int,
+        *,
+        plan: QueryPlan,
+        routes: list[tuple[RetrievalChannel, str, bool]],
+        mode: str,
+    ) -> list[RetrievedChunk]:
+        if self.unified_orchestrator is None:
+            raise RuntimeError("Unified retrieval orchestrator is not initialized")
+        if self.evolink_graph_store is None:
+            raise RuntimeError("EvoLink coordination graph is not initialized")
+
+        results = await asyncio.gather(
+            *(
+                self.unified_orchestrator.retrieve(
+                    route_query,
+                    top_k=top_k,
+                    include_events=include_events,
+                    link_evidence=True,
+                    candidate_multiplier=CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
+                    channels={route},
+                    plan_override=plan,
+                )
+                for route, route_query, include_events in routes
+            )
+        )
+        channel_candidates: dict[str, list[Any]] = {
+            "vector": [],
+            "graph": [],
+            "event": [],
+        }
+        for result in results:
+            for channel, candidates in result.candidates.items():
+                if channel in channel_candidates:
+                    channel_candidates[channel].extend(candidates)
+        bundles = fuse_evidence(
+            channel_candidates,
+            top_k=top_k,
+            linked_candidate_weight=self.eval_settings.evolink_link_weight,
+        )
+        merged = UnifiedRetrievalResult(
+            plan=plan,
+            bundles=tuple(bundles),
+            candidates={
+                channel: tuple(channel_candidates[channel])
+                for channel in ("vector", "graph", "event")
+            },
+            graph_data={
+                "route_results": [result.graph_data for result in results],
+            },
+            evidence_graph={
+                "route_results": [result.evidence_graph for result in results],
+            },
+            metadata={
+                "fusion": "independent_route_rrf",
+                "d1_mode": mode,
+                "question": question,
+                "route_queries": [
+                    {
+                        "route": route,
+                        "query": route_query,
+                        "include_events": include_events,
+                    }
+                    for route, route_query, include_events in routes
+                ],
+                "candidate_limit_per_route": top_k,
+                "route_count": len(routes),
+                "evolink_scope": "one_independent_expansion_per_route",
+                "llm_rerank": False,
+            },
+        )
+        return self._unified_result_to_chunks(merged)
+
+    @staticmethod
+    def _d1_route_query(question: str, plan: QueryPlan, *, route: str) -> str:
+        values: list[str] = [question]
+        if route == "vector":
+            values.extend([*plan.low_level_keywords, *plan.entities])
+        elif route == "graph":
+            values.extend([*plan.entities, *plan.relations, *plan.high_level_keywords])
+        else:
+            values.extend(
+                [
+                    *plan.entities,
+                    *plan.event_types,
+                    *plan.state_intents,
+                    *([plan.start_time] if plan.start_time else []),
+                    *([plan.end_time] if plan.end_time else []),
+                ]
+            )
+        return " ".join(dict.fromkeys(value.strip() for value in values if value and value.strip()))
+
     async def _retrieve_agentic_ours(self, question: str, top_k: int) -> AgenticRun:
         return await self._retrieve_agentic("agentic_ours", question, top_k)
 
@@ -1433,6 +1969,37 @@ class EvaluationRunner:
             "ours_evoneed_deep_oneplan_d1_norerank", question, top_k
         )
 
+    async def _retrieve_ours_evoneed_deep_oneplan_nolink_norerank(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic(
+            "ours_evoneed_deep_oneplan_nolink_norerank", question, top_k
+        )
+
+    async def _retrieve_ours_evoneed_deep_oneplan_shared_equal_total_norerank(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic(
+            "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+            question,
+            top_k,
+        )
+
+    async def _retrieve_ours_evoneed_deep_oneplan_shared_total_norerank(
+        self,
+        question: str,
+        top_k: int,
+    ) -> AgenticRun:
+        return await self._retrieve_agentic(
+            "ours_evoneed_deep_oneplan_shared_total_norerank",
+            question,
+            top_k,
+        )
+
     async def _retrieve_evoneed_deep_actions(
         self,
         needs: list[NeedItem],
@@ -1476,6 +2043,157 @@ class EvaluationRunner:
                 )
                 for need, budget in zip(needs, budgets, strict=True)
             )
+        )
+
+    async def _retrieve_evoneed_deep_oneplan_nolink_actions(
+        self,
+        needs: list[NeedItem],
+        budgets: list[int],
+    ) -> list[list[RetrievedChunk]]:
+        """Run the OnePlan first stage without any EvoLink expansion."""
+        if len(needs) != len(budgets):
+            raise ValueError("EvoNeed needs and budgets must have the same length")
+        return await asyncio.gather(
+            *(
+                self._retrieve_unified(
+                    need.query,
+                    budget,
+                    include_events=need.route == "event",
+                    link_evidence=False,
+                    channels={need.route},
+                    candidate_multiplier=1,
+                    plan_override=self._query_plan_from_need(need),
+                )
+                for need, budget in zip(needs, budgets, strict=True)
+            )
+        )
+
+    async def _retrieve_evoneed_deep_oneplan_shared_equal_total_actions(
+        self,
+        needs: list[NeedItem],
+        budgets: list[int],
+        *,
+        expansion_limit_override: int | None = None,
+        expansion_scope: str = "one_shared_expansion_equal_to_need_budget",
+    ) -> list[list[RetrievedChunk]]:
+        """Run need routes independently, then share one equal-budget EvoLink pass."""
+        if self.unified_orchestrator is None:
+            raise RuntimeError("Unified retrieval orchestrator is not initialized")
+        if len(needs) != len(budgets):
+            raise ValueError("EvoNeed needs and budgets must have the same length")
+        if not needs:
+            return []
+
+        plans = [self._query_plan_from_need(need) for need in needs]
+        results = await asyncio.gather(
+            *(
+                self.unified_orchestrator.retrieve(
+                    need.query,
+                    top_k=budget,
+                    include_events=need.route == "event",
+                    link_evidence=False,
+                    channels={need.route},
+                    candidate_multiplier=CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
+                    plan_override=plan,
+                )
+                for need, budget, plan in zip(needs, budgets, plans, strict=True)
+            )
+        )
+        total_budget = max(1, sum(budgets))
+        expansion_limit = max(
+            1,
+            min(
+                total_budget,
+                expansion_limit_override
+                if expansion_limit_override is not None
+                else total_budget,
+            ),
+        )
+        evolink, evolink_error = await self.unified_orchestrator.coordinate_planned_results(
+            plans,
+            results,
+            limit=expansion_limit,
+            expansion_limit_override=expansion_limit,
+        )
+
+        candidates = [
+            {channel: list(values) for channel, values in result.candidates.items()}
+            for result in results
+        ]
+        graph_target = next(
+            (index for index, need in enumerate(needs) if need.route == "graph"),
+            None,
+        )
+        event_target = next(
+            (index for index, need in enumerate(needs) if need.route == "event"),
+            None,
+        )
+        fallback_target = 0
+        shared_target_indices: set[int] = set()
+        if evolink.graph_candidates:
+            target = graph_target if graph_target is not None else (
+                event_target if event_target is not None else fallback_target
+            )
+            candidates[target]["graph"].extend(evolink.graph_candidates)
+            shared_target_indices.add(target)
+        if evolink.event_candidates:
+            target = event_target if event_target is not None else (
+                graph_target if graph_target is not None else fallback_target
+            )
+            candidates[target]["event"].extend(evolink.event_candidates)
+            shared_target_indices.add(target)
+
+        batches: list[list[RetrievedChunk]] = []
+        for index, (result, plan, budget, channel_candidates) in enumerate(
+            zip(results, plans, budgets, candidates, strict=True)
+        ):
+            bundles = fuse_evidence(
+                channel_candidates,
+                # Keep the complete shared expansion in the final need-level
+                # RRF list. Otherwise attaching a 40/60-item shared expansion
+                # to one route and truncating it back to 20 would silently
+                # destroy the equal-total budget comparison.
+                top_k=(
+                    max(budget, total_budget)
+                    if index in shared_target_indices
+                    else budget
+                ),
+                linked_candidate_weight=self.eval_settings.evolink_link_weight,
+            )
+            coordinated = UnifiedRetrievalResult(
+                plan=plan,
+                bundles=tuple(bundles),
+                candidates={
+                    channel: tuple(channel_candidates.get(channel, []))
+                    for channel in ("vector", "graph", "event")
+                },
+                graph_data=result.graph_data,
+                evidence_graph=evolink.evidence_graph,
+                event_result=result.event_result,
+                metadata={
+                    **result.metadata,
+                    "evolink_enabled": True,
+                    "evolink_error": evolink_error,
+                    "evolink": evolink.metadata,
+                    "evolink_scope": expansion_scope,
+                    "evolink_expansion_limit": expansion_limit,
+                    "shared_evolink_total_budget": total_budget,
+                },
+            )
+            batches.append(self._unified_result_to_chunks(coordinated))
+        return batches
+
+    async def _retrieve_evoneed_deep_oneplan_shared_total_actions(
+        self,
+        needs: list[NeedItem],
+        budgets: list[int],
+    ) -> list[list[RetrievedChunk]]:
+        """OnePlan with a strict query-level total budget and a fixed EvoLink cap."""
+        return await self._retrieve_evoneed_deep_oneplan_shared_equal_total_actions(
+            needs,
+            budgets,
+            expansion_limit_override=self.eval_settings.evolink_expansion_limit,
+            expansion_scope="one_shared_expansion_fixed_evolink_cap",
         )
 
     async def _retrieve_evoneed_actions(
@@ -1641,10 +2359,17 @@ class EvaluationRunner:
             "max_retrieval_rounds": self.eval_settings.agentic_max_retrieval_rounds,
             "rrf_k": self.eval_settings.agentic_rrf_k,
         }
-        if method == "ours_evoneed_deep_oneplan_d1_norerank":
+        if method in {
+            "ours_evoneed_deep_oneplan_d1_norerank",
+            "ours_evoneed_deep_oneplan_nolink_norerank",
+            "ours_evoneed_deep_oneplan_shared_equal_total_norerank",
+            "ours_evoneed_deep_oneplan_shared_total_norerank",
+        }:
             return await graph.run(
                 question,
-                retrieval_budget=top_k,
+                retrieval_budget=(top_k * 3
+                    if method == "ours_evoneed_deep_oneplan_shared_total_norerank"
+                    else top_k),
                 retrieval_only=True,
                 **run_kwargs,
             )
@@ -1671,6 +2396,7 @@ class EvaluationRunner:
         *,
         include_events: bool,
         link_evidence: bool = False,
+        include_event_effects: bool = True,
         channels: set[RetrievalChannel] | None = None,
         candidate_multiplier: int = CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
         plan_override: QueryPlan | None = None,
@@ -1682,6 +2408,7 @@ class EvaluationRunner:
             top_k=top_k,
             include_events=include_events,
             link_evidence=link_evidence,
+            include_event_effects=include_event_effects,
             candidate_multiplier=candidate_multiplier,
             channels=channels,
             plan_override=plan_override,
@@ -1787,6 +2514,50 @@ class EvaluationRunner:
                 "expansion_limit": self.eval_settings.evolink_expansion_limit,
                 "link_weight": self.eval_settings.evolink_link_weight,
             }
+            if "ours_association_only" in self.methods:
+                expected["evolink_profile"]["mechanism_ablation"] = (
+                    "association_only_disables_event_effect_bridge"
+                )
+        if D1_METHODS & set(self.methods):
+            d1_methods = set(self.methods) & D1_METHODS
+            if "ours_d1_queryrewrite_sharedlink" in d1_methods:
+                expansion_scope = (
+                    "mixed"
+                    if "ours_d1_direct_noplan" in d1_methods
+                    or "ours_d1_queryrewrite" in d1_methods
+                    else "one_shared_expansion_after_all_routes"
+                )
+            elif "ours_d1_queryrewrite_sharedlink_total" in d1_methods:
+                expansion_scope = "one_shared_expansion_fixed_evolink_cap"
+            else:
+                expansion_scope = "one_independent_expansion_per_route"
+            expected["d1_profile"] = {
+                "methods": sorted(d1_methods),
+                "max_routes": 3,
+                "route_budget": self.top_k,
+                "candidate_multiplier": CONTROLLED_ROUTE_CANDIDATE_MULTIPLIER,
+                "cross_path_expansion": expansion_scope,
+                "fusion": "plain_rrf",
+                "llm_rerank": False,
+                "query_planner_calls": (
+                    1
+                    if {
+                        "ours_d1_queryrewrite",
+                        "ours_d1_queryrewrite_sharedlink",
+                        "ours_d1_queryrewrite_sharedlink_total",
+                    }
+                    & set(self.methods)
+                    else 0
+                ),
+            }
+            if "ours_d1_queryrewrite_sharedlink" in d1_methods:
+                expected["d1_profile"]["shared_expansion_budget"] = (
+                    "route_budget_times_route_count"
+                )
+            if "ours_d1_queryrewrite_sharedlink_total" in d1_methods:
+                expected["d1_profile"]["shared_expansion_budget"] = (
+                    "fixed_evolink_expansion_cap"
+                )
         if STANDARD_EVONEED_METHODS & set(self.methods):
             expected["evoneed_profile"] = {
                 "version": EVONEED_PROMPT_PROFILE_VERSION,
@@ -1890,6 +2661,66 @@ class EvaluationRunner:
                 "llm_stages": ["joint_plan"],
                 "secondary_query_planner_calls": 0,
                 "llm_rerank": False,
+                "final_output_k": self.top_k,
+            }
+        if "ours_evoneed_deep_oneplan_nolink_norerank" in self.methods:
+            expected["evoneed_deep_oneplan_nolink_norerank_profile"] = {
+                "version": EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                "prompt_digest": evoneed_deep_oneplan_prompt_profile_digest(),
+                "initial_retrieval": "planned_needs",
+                "max_planned_actions": 3,
+                "allow_repeated_routes": True,
+                "query_composition": "planner_subquery_only",
+                "route_budget_mode": "per_action",
+                "candidate_budget_per_need": self.top_k,
+                "candidate_multiplier": 1,
+                "cross_path_expansion": "none",
+                "need_fusion": "plain_rrf",
+                "rrf_k": self.eval_settings.agentic_rrf_k,
+                "llm_stages": ["joint_plan"],
+                "secondary_query_planner_calls": 0,
+                "llm_rerank": False,
+                "final_output_k": self.top_k,
+            }
+        if "ours_evoneed_deep_oneplan_shared_equal_total_norerank" in self.methods:
+            expected["evoneed_deep_oneplan_shared_equal_total_norerank_profile"] = {
+                "version": EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                "prompt_digest": evoneed_deep_oneplan_prompt_profile_digest(),
+                "initial_retrieval": "planned_needs",
+                "max_planned_actions": 3,
+                "allow_repeated_routes": True,
+                "query_composition": "planner_subquery_only",
+                "route_budget_mode": "per_action",
+                "candidate_budget_per_need": self.top_k,
+                "candidate_multiplier": 1,
+                "cross_path_expansion": "one_shared_expansion_equal_to_need_budget",
+                "need_fusion": "plain_rrf",
+                "rrf_k": self.eval_settings.agentic_rrf_k,
+                "llm_stages": ["joint_plan"],
+                "secondary_query_planner_calls": 0,
+                "llm_rerank": False,
+                "shared_expansion_budget": "sum_of_need_budgets",
+                "final_output_k": self.top_k,
+            }
+        if "ours_evoneed_deep_oneplan_shared_total_norerank" in self.methods:
+            expected["evoneed_deep_oneplan_shared_total_norerank_profile"] = {
+                "version": EVONEED_DEEP_ONEPLAN_PROMPT_PROFILE_VERSION,
+                "prompt_digest": evoneed_deep_oneplan_prompt_profile_digest(),
+                "initial_retrieval": "planned_needs",
+                "max_planned_actions": 3,
+                "allow_repeated_routes": True,
+                "query_composition": "planner_subquery_only",
+                "route_budget_mode": "shared_total",
+                "query_level_total_budget": "route_count_times_top_k",
+                "candidate_budget_per_need": self.top_k,
+                "candidate_multiplier": 1,
+                "cross_path_expansion": "one_shared_expansion_fixed_evolink_cap",
+                "need_fusion": "plain_rrf",
+                "rrf_k": self.eval_settings.agentic_rrf_k,
+                "llm_stages": ["joint_plan"],
+                "secondary_query_planner_calls": 0,
+                "llm_rerank": False,
+                "evolink_expansion_cap": self.eval_settings.evolink_expansion_limit,
                 "final_output_k": self.top_k,
             }
         if self.chunking_strategy != "fixed":

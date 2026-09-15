@@ -75,6 +75,7 @@ class EvoLinkCoordinator:
         entity_names: Iterable[str] = (),
         event_candidates: Iterable[EvidenceCandidate] = (),
         limit: int,
+        include_event_effects: bool = True,
     ) -> EvoLinkResult:
         names = self._useful_names(
             [*plan.entities, *entity_names],
@@ -148,6 +149,7 @@ class EvoLinkCoordinator:
                 include_inactive=True,
                 include_disputed=True,
                 expand_event_chain=plan.expand_event_chain,
+                include_event_effects=include_event_effects,
                 limit=limit,
             )
         )
@@ -165,6 +167,7 @@ class EvoLinkCoordinator:
                 "seed_event_count": len(event_ids),
                 "seed_limit_per_name": self._seed_limit_per_name,
                 "expansion_limit": limit,
+                "include_event_effects": include_event_effects,
                 "linked_assertion_count": len(expansion.assertions),
                 "linked_event_count": len(expansion.events),
                 "linked_effect_count": len(expansion.effects),

@@ -131,6 +131,7 @@ class UnifiedRetrievalOrchestrator:
         top_k: int,
         include_events: bool,
         link_evidence: bool = False,
+        include_event_effects: bool = True,
         candidate_multiplier: int = 1,
         channels: set[RetrievalChannel] | None = None,
         plan_override: QueryPlan | None = None,
@@ -190,6 +191,7 @@ class UnifiedRetrievalOrchestrator:
             event_candidates,
             candidate_limit,
             enabled=link_evidence,
+            include_event_effects=include_event_effects,
         )
         if link_evidence:
             graph_candidates = self._merge_channel_candidates(
@@ -230,6 +232,7 @@ class UnifiedRetrievalOrchestrator:
                 "requested_channels": sorted(requested_channels),
                 "event_error": event_error,
                 "evolink_enabled": link_evidence,
+                "evolink_include_event_effects": include_event_effects,
                 "evolink_error": evolink_error,
                 "evolink": evolink_result.metadata,
                 "evolink_link_weight": self._evolink_link_weight,
@@ -245,6 +248,8 @@ class UnifiedRetrievalOrchestrator:
         results: Sequence[UnifiedRetrievalResult],
         *,
         limit: int,
+        expansion_limit_override: int | None = None,
+        include_event_effects: bool = True,
     ) -> tuple[EvoLinkResult, str | None]:
         """Run one shared EvoLink expansion after all planned routes finish."""
         if not plans:
@@ -261,12 +266,18 @@ class UnifiedRetrievalOrchestrator:
                 raise RuntimeError(error)
             return EvoLinkResult(), error
         try:
+            expansion_limit = (
+                min(limit, expansion_limit_override)
+                if expansion_limit_override is not None
+                else min(limit, self._evolink_expansion_limit)
+            )
             return (
                 await self._evolink.coordinate(
                     plan,
                     entity_names=entity_names,
                     event_candidates=event_candidates,
-                    limit=min(limit, self._evolink_expansion_limit),
+                    limit=expansion_limit,
+                    include_event_effects=include_event_effects,
                 ),
                 None,
             )
@@ -284,6 +295,7 @@ class UnifiedRetrievalOrchestrator:
         candidate_limit: int,
         *,
         enabled: bool,
+        include_event_effects: bool = True,
     ) -> tuple[EvoLinkResult, str | None]:
         if not enabled:
             return EvoLinkResult(), None
@@ -299,6 +311,7 @@ class UnifiedRetrievalOrchestrator:
                     entity_names=self._graph_entity_names(graph_raw),
                     event_candidates=event_candidates,
                     limit=min(candidate_limit, self._evolink_expansion_limit),
+                    include_event_effects=include_event_effects,
                 ),
                 None,
             )
